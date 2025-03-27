@@ -11,7 +11,7 @@
 - 详细的日志记录，内置错误处理和重试机制
 
 ## 安装
-
+下载本文件，并通过下面的命令安装依赖项
 ```bash
 pip install pyyaml openai ollama
 ```
