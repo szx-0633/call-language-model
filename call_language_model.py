@@ -6,8 +6,8 @@ from openai import OpenAI
 from openai.types.chat import ChatCompletion
 import base64
 import ollama
+import os
 
-# Author: Zhangxiao Shen, Claude-3.7-Sonnet, Qwen2.5-max, DeepSeek-R1
 # 配置文件格式：llm_config.yaml，需要放在检查本文件所在路径内或者指定其路径
 # 当前支持多种模型提供商，也可自行添加提供商和模型名称，但仅支持openai和ollama两种渠道调用模型
 # 不支持多轮对话，也不支持真正的流式调用，对于必须采用流式调用的模型如QwQ-32B，会将流式调用的结果收集后返回
@@ -38,11 +38,14 @@ class ModelConfig:
 
     def _load_config(self, path: str) -> Dict:
         try:
-            with open(path, 'r') as f:
+            with open(path, 'r', encoding='utf-8') as f:
                 return yaml.safe_load(f)
+        except FileNotFoundError:
+            logging.error(f"Config file not found: {path}")
+            raise FileNotFoundError(f"Config file not found: {path}")
         except Exception as e:
             logging.error(f"Failed to load config: {str(e)}")
-            raise AttributeError(f"Config file not found or wrong format: {path}")
+            raise AttributeError(f"Config file in wrong format: {path}")
 
     def get_credentials(self, model_provider: str, model_name: str) -> Dict:
         """获取模型凭证"""
