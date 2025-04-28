@@ -141,6 +141,7 @@ class BaseModel:
             user_prompt: str,
             temperature: Optional[float] = None,
             max_tokens: Optional[int] = None,
+            enable_thinking: Optional[bool] = None,
             files: Optional[List[str]] = None
     ) -> (str, int, str):
         raise NotImplementedError
@@ -182,11 +183,16 @@ class OpenAIModel(BaseModel):
 
     def _prepare_params(self, messages, **kwargs) -> dict:
         """准备API参数，供普通和流式调用共用"""
+        if "qwen3" in str(self.credentials.get('model_name')):
+            enable_thinking  = kwargs.get('enable_thinking', True)
+        else:
+            enable_thinking = None
         params = {
             "model": self.credentials.get('model_name', 'gpt-4o'),
             "messages": messages,
             "temperature": kwargs.get('temperature'),
-            "max_tokens": kwargs.get('max_tokens')
+            "max_tokens": kwargs.get('max_tokens'),
+            "enable_thinking": enable_thinking
         }
         return {k: v for k, v in params.items() if v is not None}
 
@@ -317,16 +323,21 @@ class OllamaModel(BaseModel):
     def generate(self, **kwargs) -> (str, int, str):
         # 构造消息
         messages = [{"role": "system", "content": kwargs.get('system_prompt')}]
+        user_prompt_content = kwargs.get('user_prompt')
+        if "qwen3" in str(self.credentials.get('model_name')):
+            enable_thinking  = kwargs.get('enable_thinking', True)
+            if not enable_thinking:
+                user_prompt_content += " /no_think"
         if kwargs.get('files'):
             image_encoded = [self._encode_image(f) for f in kwargs['files']]
             # 处理多模态请求
             messages.append({
                 "role": "user",
-                "content": kwargs.get('user_prompt'),
+                "content": user_prompt_content,
                 "images": kwargs['files'],
             })
         else:
-            messages.append({"role": "user", "content": kwargs.get('user_prompt')})
+            messages.append({"role": "user", "content": user_prompt_content})
 
         options = {
             "temperature": kwargs.get('temperature'),
@@ -343,7 +354,7 @@ class OllamaModel(BaseModel):
                 messages = messages,
                 options = options,
             )
-            return self._parse_response(response)
+            return self._parse_response(response, enable_thinking)
         except Exception as e:
             logging.error(f"Ollama API error: {str(e)}")
             print(f"Ollama API error: {str(e)}")
@@ -355,6 +366,10 @@ class OllamaModel(BaseModel):
         """
         # 构造消息
         messages = [{"role": "system", "content": kwargs.get('system_prompt')}]
+        if "qwen3" in str(self.credentials.get('model_name')):
+            enable_thinking  = kwargs.get('enable_thinking', True)
+            if not enable_thinking:
+                user_prompt_content += " /no_think"
         if kwargs.get('files'):
             image_encoded = [self._encode_image(f) for f in kwargs['files']]
             # 处理多模态请求
@@ -409,6 +424,9 @@ class OllamaModel(BaseModel):
                     tokens = 0
                     if hasattr(stream, 'eval_count') and hasattr(stream, 'prompt_eval_count'):
                         tokens = stream.eval_count + stream.prompt_eval_count
+                    
+                    if not enable_thinking:
+                        complete_response = complete_response.replace("<think>\n", "").replace("\n</think>\n\n", "")
 
                     return complete_response, tokens, None
 
@@ -430,10 +448,13 @@ class OllamaModel(BaseModel):
                     logging.error(error_msg)
                     return complete_response, int(estimated_tokens), error_msg
 
-    def _parse_response(self, response) -> (str, int, str):
+    def _parse_response(self, response, enable_thinking) -> (str, int, str):
         tokens_used = response.eval_count + response.prompt_eval_count
+        complete_response = response.message.content
+        if not enable_thinking:
+            complete_response = complete_response.replace("<think>\n", "").replace("\n</think>\n\n", "")
         return (
-            response.message.content,
+            complete_response,
             tokens_used,
             None
         )
@@ -623,6 +644,7 @@ def call_language_model(
         user_prompt: str,
         stream: bool = False,
         collect: bool = True,
+        enable_thinking: Optional[bool] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         files: Optional[List[str]] = None,
@@ -636,6 +658,7 @@ def call_language_model(
     :param user_prompt: 用户提示
     :param stream: 是否流式调用，可选
     :param collect: 是否收集流式调用的结果，仅在stream为True时有效，默认为True，设为False为真流式调用，需要自行收集结果
+    :param enable_thinking: 是否启用推理，仅对Qwen3系列模型有效且默认为True，其余模型该参数将被忽略
     :param temperature: 温度参数，可选
     :param max_tokens: 最大生成token数，可选
     :param files: 图片文件路径列表，可选
@@ -674,6 +697,7 @@ def call_language_model(
                 user_prompt=user_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                enable_thinking=enable_thinking,
                 collect=collect,
                 files=files
             )
@@ -683,10 +707,11 @@ def call_language_model(
                 user_prompt=user_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                enable_thinking=enable_thinking,
                 files=files
             )
         # 记录成功日志
-        content, tokens, error = result
+        _, tokens, _ = result
         logging.info(f"API call succeeded. Model: {model_name}, Provider: {model_provider}, Tokens used: {tokens}")
         return result
     except Exception as e:
@@ -757,13 +782,14 @@ if __name__ == "__main__":
     # 示例使用
     # 1. 调用语言模型示例
     # response, tokens_used, error = call_language_model(
-    #     model_provider='aliyun',
-    #     model_name='qwq-32b',
+    #     model_provider='ollama',
+    #     model_name='qwen3:4b',
     #     system_prompt="You are a helpful assistant.",
     #     user_prompt="介绍一下谷歌地球引擎GEE", #非多模态
-    #     stream=True,
-    #     collect=False,
-    #     config_path="../../llm_config.yaml",
+    #     enable_thinking=False,
+    #     stream=False,
+    #     # collect=False,
+    #     config_path="./llm_config.yaml",
     #     # user_prompt="Try to solve this problem with Python",
     #     # files=['1.png'] #多模态
     # )
