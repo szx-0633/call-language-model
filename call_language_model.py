@@ -185,14 +185,15 @@ class OpenAIModel(BaseModel):
         """准备API参数，供普通和流式调用共用"""
         if "qwen3" in str(self.credentials.get('model_name')):
             enable_thinking  = kwargs.get('enable_thinking', True)
+            extra_body = {"enable_thinking": enable_thinking}
         else:
-            enable_thinking = None
+            extra_body = None
         params = {
             "model": self.credentials.get('model_name', 'gpt-4o'),
             "messages": messages,
             "temperature": kwargs.get('temperature'),
             "max_tokens": kwargs.get('max_tokens'),
-            "enable_thinking": enable_thinking
+            "extra_body": extra_body
         }
         return {k: v for k, v in params.items() if v is not None}
 
@@ -328,6 +329,9 @@ class OllamaModel(BaseModel):
             enable_thinking  = kwargs.get('enable_thinking', True)
             if not enable_thinking:
                 user_prompt_content += " /no_think"
+        else:
+            enable_thinking = None
+
         if kwargs.get('files'):
             image_encoded = [self._encode_image(f) for f in kwargs['files']]
             # 处理多模态请求
@@ -370,6 +374,9 @@ class OllamaModel(BaseModel):
             enable_thinking  = kwargs.get('enable_thinking', True)
             if not enable_thinking:
                 user_prompt_content += " /no_think"
+        else:
+            enable_thinking = None
+
         if kwargs.get('files'):
             image_encoded = [self._encode_image(f) for f in kwargs['files']]
             # 处理多模态请求
@@ -781,18 +788,18 @@ def call_embedding_model(
 if __name__ == "__main__":
     # 示例使用
     # 1. 调用语言模型示例
-    # response, tokens_used, error = call_language_model(
-    #     model_provider='ollama',
-    #     model_name='qwen3:4b',
-    #     system_prompt="You are a helpful assistant.",
-    #     user_prompt="介绍一下谷歌地球引擎GEE", #非多模态
-    #     enable_thinking=False,
-    #     stream=False,
-    #     # collect=False,
-    #     config_path="./llm_config.yaml",
-    #     # user_prompt="Try to solve this problem with Python",
-    #     # files=['1.png'] #多模态
-    # )
+    response, tokens_used, error = call_language_model(
+        model_provider='aliyun',
+        model_name='qwen3-32b',
+        system_prompt="You are a helpful assistant.",
+        user_prompt="Introduce GEE", #非多模态
+        enable_thinking=True,
+        stream=True,
+        # collect=False,
+        config_path="./llm_config.yaml",
+        # user_prompt="Try to solve this problem with Python",
+        # files=['1.png'] #多模态
+    )
 
     # 处理真流式响应
     # is_first_chunk = True
@@ -821,10 +828,10 @@ if __name__ == "__main__":
     #     else:
     #         print(chunk)
 
-    # print(f"\nResponse: {response}")
-    # print(f"Tokens used: {tokens_used}")
-    # if error:
-    #     print(f"Error: {error}")
+    print(f"\nResponse: {response}")
+    print(f"Tokens used: {tokens_used}")
+    if error:
+        print(f"Error: {error}")
 
     # 2. 嵌入模型使用示例
     # embeddings, tokens_used, error = call_embedding_model(
