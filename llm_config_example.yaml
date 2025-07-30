@@ -1,0 +1,39 @@
+# LLM Configuration Example File
+# Copy this file to llm_config.yaml and fill in your actual API keys and endpoints
+
+# Language Models Configuration
+all_models:
+  - provider: "openai"
+    model_name: ["gpt-4o", "gpt-4o-mini"]
+    api_key: "sk-your-openai-api-key-here"
+    base_url: "https://api.openai.com/v1"
+  
+  - provider: "volcengine"
+    model_name: ["deepseek-r1-250120", "deepseek-v3-241226", "doubao-1-5-pro-256k-250115"]
+    api_key: "your-volcengine-api-key-here"
+    base_url: "https://ark.cn-beijing.volces.com/api/v3/"
+  
+  - provider: "aliyun"
+    model_name: ["qwen2.5-32b-instruct", "qwen-turbo", "qwen-max", "qwq-32b", "qwen3-7b-instruct", "qwen3-14b-instruct"]
+    api_key: "your-aliyun-api-key-here"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  
+  - provider: "ollama"
+    model_name: ["llama3.1:8b", "mistral:7b", "qwen3:7b"]
+    base_url: "http://localhost:11434"
+
+# Embedding Models Configuration
+embedding_models:
+  - provider: "openai"
+    model_name: ["text-embedding-3-small", "text-embedding-3-large"]
+    api_key: "sk-your-openai-api-key-here"
+    base_url: "https://api.openai.com/v1"
+  
+  - provider: "ollama"
+    model_name: ["nomic-embed-text", "mxbai-embed-large"]
+    base_url: "http://localhost:11434"
+  
+  - provider: "aliyun"
+    model_name: ["text-embedding-v3"]
+    api_key: "your-aliyun-api-key-here"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
