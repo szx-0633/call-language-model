@@ -3,7 +3,7 @@
 """
 @File    :  call_language_model.py
 @Author  :  Zhangxiao Shen
-@Date    :  2025/7/10
+@Date    :  2025/7/31
 @Description: Call language models and embedding models using OpenAI or Ollama APIs.
 """
 
