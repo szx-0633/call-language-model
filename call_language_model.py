@@ -868,8 +868,8 @@ if __name__ == "__main__":
     # 示例使用
     # 1. 调用语言模型示例
     response, tokens_used, error = call_language_model(
-        model_provider='zxshen',
-        model_name='openai/gpt-4.1-nano',
+        model_provider='openai',
+        model_name='gpt-4.1-nano',
         system_prompt="You are a helpful assistant.",
         user_prompt="Introduce GEE", #非多模态
         enable_thinking=False, 
