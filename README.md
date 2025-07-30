@@ -259,7 +259,7 @@ if not error:
 ```python
 response, tokens, error = call_language_model(
     model_provider='aliyun',
-    model_name='qwen3-7b-instruct',
+    model_name='qwen3-4b',
     system_prompt="You are a helpful assistant.",
     user_prompt="解决这个复杂的数学问题",
     enable_thinking=True  # 启用推理模式
