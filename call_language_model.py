@@ -10,12 +10,14 @@
 import yaml
 import logging
 import time
+import json
 from typing import Optional, Dict, List, Union
 from openai import OpenAI
 from openai.types.chat import ChatCompletion
 import base64
 import ollama
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 配置文件格式：llm_config.yaml，需要放在检查本文件所在路径内或者指定其路径
 # 当前支持多种模型提供商，也可自行添加提供商和模型名称，但仅支持openai和ollama两种渠道调用模型
@@ -23,6 +25,8 @@ import os
 # 流式调用时不支持统计token消耗
 # 使用大语言模型的入口函数为call_language_model
 # 支持使用嵌入模型，需使用call_embedding_model函数调用，暂不支持多模态嵌入
+# 支持批量并行调用大语言模型，使用batch_call_language_model函数，该模式下不支持真正的流式调用
+# 批量调用支持tqdm进度条显示和结果保存到JSONL文件
 # 处理OpenAI真流式响应的示例代码
 #     is_first_chunk = True
 #     for chunk in response:
@@ -863,27 +867,206 @@ def call_embedding_model(
         return [], 0, error_msg
 
 
+def batch_call_language_model(
+        model_provider: str,
+        model_name: str,
+        requests: List[Dict],
+        max_workers: int = 5,
+        stream: bool = False,
+        enable_thinking: Optional[bool] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        skip_model_checking: bool = False,
+        config_path: Optional[str] = r'./llm_config.yaml',
+        custom_config: Optional[Dict] = None,
+        output_file: Optional[str] = None,
+        show_progress: bool = True,
+) -> List[Dict]:
+    """
+    批量并行调用语言模型的统一入口函数。该模式下不支持真正的流式调用。
+    :param model_provider: 模型提供商，如"openai","aliyun","volcengine","ollama"，不区分在线和本地
+    :param model_name: 模型名称，注意部分提供商的模型名称可能包含版本号
+    :param requests: 请求列表，每个元素为字典，包含system_prompt, user_prompt和可选的files字段
+                    格式: [{"system_prompt": "...", "user_prompt": "...", "files": [...]}, ...]
+    :param max_workers: 最大并行工作线程数，默认为5
+    :param stream: 是否流式调用，默认为False，当设为True时将收集并返回流式响应，不支持真正的流式调用
+    :param enable_thinking: 是否启用推理，仅对Qwen3系列模型有效且默认为True，其余模型该参数将被忽略
+    :param temperature: 温度参数，可选
+    :param max_tokens: 最大生成token数，可选
+    :param skip_model_checking: 是否跳过模型包含列表检查，默认为False
+    :param config_path: 配置文件路径，与custom_config二选一
+    :param custom_config: 通过自定义配置字典而非配置文件配置模型，与config_path二选一
+    :param output_file: 输出JSONL文件路径，可选。如果提供，将保存所有结果到指定文件
+    :param show_progress: 是否显示进度条，默认为True
+    :return: 结果列表，每个元素为字典，包含request_index, response_text, tokens_used, error_msg字段
+    """
+    if not requests:
+        logging.warning("Empty requests list provided in batch_call_language_model.")
+        return []
+
+    from tqdm import tqdm
+
+    # 验证请求格式
+    for i, req in enumerate(requests):
+        if not isinstance(req, dict):
+            error_msg = f"Request {i} is not a dictionary"
+            logging.error(error_msg)
+            return [{"request_index": i, "response_text": "", "tokens_used": 0, "error_msg": error_msg} for i in range(len(requests))]
+        
+        if 'system_prompt' not in req or 'user_prompt' not in req:
+            error_msg = f"Request {i} missing required fields: system_prompt and user_prompt"
+            logging.error(error_msg)
+            return [{"request_index": i, "response_text": "", "tokens_used": 0, "error_msg": error_msg} for i in range(len(requests))]
+
+    def _process_single_request(request_data):
+        """处理单个请求的内部函数"""
+        index, request = request_data
+        try:
+            response, tokens, error = call_language_model(
+                model_provider=model_provider,
+                model_name=model_name,
+                system_prompt=request['system_prompt'],
+                user_prompt=request['user_prompt'],
+                stream=stream,
+                collect=True,
+                enable_thinking=enable_thinking,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                files=request.get('files', None),
+                skip_model_checking=skip_model_checking,
+                config_path=config_path,
+                custom_config=custom_config,
+            )
+            
+            result = {
+                "request_index": index,
+                "request": request,  # 保存原始请求
+                "response_text": response,
+                "tokens_used": tokens,
+                "error_msg": error,
+                "model_provider": model_provider,
+                "model_name": model_name,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Unexpected error processing request {index}: {str(e)}"
+            logging.error(error_msg)
+            return {
+                "request_index": index,
+                "request": request,
+                "response_text": "",
+                "tokens_used": 0,
+                "error_msg": error_msg,
+                "model_provider": model_provider,
+                "model_name": model_name,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+
+    # 使用线程池并行处理请求
+    results = [None] * len(requests)  # 预分配结果列表
+    
+    # 创建进度条
+    if show_progress:
+        pbar = tqdm(total=len(requests), desc="Processing requests", unit="req")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有任务
+        future_to_index = {
+            executor.submit(_process_single_request, (i, req)): i 
+            for i, req in enumerate(requests)
+        }
+        
+        # 收集结果
+        for future in as_completed(future_to_index):
+            try:
+                result = future.result()
+                results[result["request_index"]] = result
+                
+                # 更新进度条
+                if show_progress:
+                    pbar.update(1)
+                    # 显示当前状态信息
+                    successful = sum(1 for r in results if r and not r.get("error_msg"))
+                    failed = sum(1 for r in results if r and r.get("error_msg"))
+                    pbar.set_postfix({"Success": successful, "Failed": failed})
+                    
+            except Exception as e:
+                index = future_to_index[future]
+                error_msg = f"Thread execution error for request {index}: {str(e)}"
+                logging.error(error_msg)
+                results[index] = {
+                    "request_index": index,
+                    "request": requests[index] if index < len(requests) else {},
+                    "response_text": "",
+                    "tokens_used": 0,
+                    "error_msg": error_msg,
+                    "model_provider": model_provider,
+                    "model_name": model_name,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                }
+                
+                # 更新进度条
+                if show_progress:
+                    pbar.update(1)
+                    successful = sum(1 for r in results if r and not r.get("error_msg"))
+                    failed = sum(1 for r in results if r and r.get("error_msg"))
+                    pbar.set_postfix({"Success": successful, "Failed": failed})
+
+    # 关闭进度条
+    if show_progress:
+        pbar.close()
+
+    # 记录批量调用日志
+    total_tokens = sum(r.get("tokens_used", 0) for r in results if r)
+    successful_requests = sum(1 for r in results if r and not r.get("error_msg"))
+    
+    logging.info(f"Batch API call completed. Model: {model_name}, Provider: {model_provider}, "
+                f"Total requests: {len(requests)}, Successful: {successful_requests}, "
+                f"Total tokens used: {total_tokens}")
+    
+    # 保存结果到JSONL文件（如果指定了输出文件）
+    if output_file:
+        try:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                for result in results:
+                    if result:  # 确保结果不为None
+                        json.dump(result, f, ensure_ascii=False)
+                        f.write('\n')
+            logging.info(f"Results saved to {output_file}")
+            if show_progress:
+                print(f"Results saved to {output_file}")
+        except Exception as e:
+            error_msg = f"Failed to save results to {output_file}: {str(e)}"
+            logging.error(error_msg)
+            if show_progress:
+                print(f"Warning: {error_msg}")
+    
+    return results
+
 
 if __name__ == "__main__":
     # 示例使用
     # 1. 调用语言模型示例
-    response, tokens_used, error = call_language_model(
-        model_provider='openai',
-        model_name='gpt-4.1-nano',
-        system_prompt="You are a helpful assistant.",
-        user_prompt="Introduce GEE", #非多模态
-        enable_thinking=False, 
-        stream=False,
-        # collect=False,
-        skip_model_checking=True,
-        config_path="./llm_config.yaml",
-        # custom_config={
-        #     'api_key': 'sk-xxx',
-        #     'base_url': 'https://api.openai.com/v1/'
-        # }
-        # user_prompt="Try to solve this problem with Python",
-        # files=['1.png'] #多模态
-    )
+    # response, tokens_used, error = call_language_model(
+    #     model_provider='openai',
+    #     model_name='gpt-4.1-mini',
+    #     system_prompt="You are a helpful assistant.",
+    #     user_prompt="Introduce GEE", #非多模态
+    #     enable_thinking=False, 
+    #     stream=False,
+    #     # collect=False,
+    #     skip_model_checking=True,
+    #     config_path="./llm_config.yaml",
+    #     # custom_config={
+    #     #     'api_key': 'sk-xxx',
+    #     #     'base_url': 'https://api.openai.com/v1/'
+    #     # }
+    #     # user_prompt="Try to solve this problem with Python",
+    #     # files=['1.png'] #多模态
+    # )
 
     # 处理真流式响应
     # is_first_chunk = True
@@ -912,10 +1095,10 @@ if __name__ == "__main__":
     #     else:
     #         print(chunk)
 
-    print(f"\nResponse: {response}")
-    print(f"Tokens used: {tokens_used}")
-    if error:
-        print(f"Error: {error}")
+    # print(f"\nResponse: {response}")
+    # print(f"Tokens used: {tokens_used}")
+    # if error:
+    #     print(f"Error: {error}")
 
     # 2. 嵌入模型使用示例
     # embeddings, tokens_used, error = call_embedding_model(
@@ -931,5 +1114,42 @@ if __name__ == "__main__":
     # print(f"Tokens used: {tokens_used}")
     # if error:
     #     print(f"Error: {error}")
+
+    # 3. 批量调用语言模型示例
+    # batch_requests = [
+    #     {
+    #         "system_prompt": "You are a helpful assistant.",
+    #         "user_prompt": "What is Python?",
+    #     },
+    #     {
+    #         "system_prompt": "You are a math tutor.",
+    #         "user_prompt": "What is 2+2?",
+    #     },
+    #     {
+    #         "system_prompt": "You are a travel guide.",
+    #         "user_prompt": "Tell me about Paris.",
+    #         "files": None
+    #     }
+    # ]
+    
+    # 批量调用
+    # batch_results = batch_call_language_model(
+    #     model_provider='openai',
+    #     model_name='gpt-4.1-mini',
+    #     requests=batch_requests,
+    #     max_workers=3,
+    #     output_file="batch_results.jsonl",
+    #     show_progress=True,
+    #     enable_thinking=False,
+    #     skip_model_checking=True,
+    #     config_path="./llm_config.yaml"
+    # )
+    
+    # print(f"\nBatch processing completed:")
+    # for result in batch_results:
+    #     print(f"Request {result['request_index']}: "
+    #           f"Response length: {len(result['response_text'])} chars, "
+    #           f"Tokens: {result['tokens_used']}, "
+    #           f"Error: {result['error_msg'] or 'None'}")
 
     print(1)

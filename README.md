@@ -8,15 +8,20 @@
 - 支持 Ollama 本地模型调用
 - 支持多模态输入（文本 + 图像）
 - **支持嵌入模型调用**，提供统一的向量生成接口
+- **支持批量并行调用**，可同时处理多个请求，提高处理效率
+- **进度条显示**，批量处理时可实时查看处理进度和成功率
+- **结果保存功能**，支持将批量调用结果保存到JSONL文件
 - **真正的流式调用**，支持实时输出和收集模式
 - **自定义配置支持**，可通过代码直接配置而无需配置文件
 - 统一的调用接口，简化集成过程，直接返回结果和信息，免去记忆多种API格式的烦恼
 - 详细的日志记录，内置错误处理和重试机制
 
 ## 安装
+
 下载本文件，并通过下面的命令安装依赖项
+
 ```bash
-pip install pyyaml openai ollama
+pip install pyyaml openai ollama tqdm
 ```
 
 ## 快速开始
@@ -62,7 +67,7 @@ embedding_models:
 ### 语言模型调用
 
 ```python
-from call_language_model import call_language_model, call_embedding_model
+from call_language_model import call_language_model, call_embedding_model, batch_call_language_model
 
 # 基本文本调用
 response_text, tokens_used, error = call_language_model(
@@ -202,6 +207,84 @@ if not error:
     print(f"使用的token数: {tokens_used}")
 ```
 
+### 批量调用语言模型
+
+```python
+from call_language_model import batch_call_language_model
+
+# 准备批量请求
+batch_requests = [
+    {
+        "system_prompt": "You are a helpful assistant.",
+        "user_prompt": "什么是Python?",
+    },
+    {
+        "system_prompt": "You are a math tutor.",
+        "user_prompt": "2+2等于多少?",
+    },
+    {
+        "system_prompt": "You are a travel guide.",
+        "user_prompt": "介绍一下巴黎的景点。",
+        "files": None  # 可选的多模态文件
+    },
+    {
+        "system_prompt": "You are an image analyzer.",
+        "user_prompt": "请分析这张图片",
+        "files": ["image1.jpg", "image2.png"]  # 多模态请求
+    }
+]
+
+# 批量并行调用
+batch_results = batch_call_language_model(
+    model_provider='openai',
+    model_name='gpt-4o-mini',
+    requests=batch_requests,
+    max_workers=3,  # 并行处理3个请求
+    stream=False,   # 批量模式不支持真正的流式调用
+    enable_thinking=False,
+    temperature=0.7,
+    skip_model_checking=True,
+    config_path="./llm_config.yaml"
+)
+
+# 带进度条和文件保存的批量调用
+batch_results = batch_call_language_model(
+    model_provider='openai',
+    model_name='gpt-4o-mini',
+    requests=batch_requests,
+    max_workers=3,
+    output_file="batch_results.jsonl",  # 保存结果到JSONL文件
+    show_progress=True,  # 显示进度条（默认为True）
+    temperature=0.7,
+    skip_model_checking=True,
+    config_path="./llm_config.yaml"
+)
+
+# 处理批量结果
+print(f"批量处理完成，共处理 {len(batch_results)} 个请求")
+for result in batch_results:
+    print(f"请求 {result['request_index']}:")
+    if result['error_msg']:
+        print(f"  错误: {result['error_msg']}")
+    else:
+        print(f"  响应长度: {len(result['response_text'])} 字符")
+        print(f"  使用Token: {result['tokens_used']}")
+        print(f"  响应内容: {result['response_text'][:100]}...")  # 显示前100个字符
+
+# 不显示进度条的静默模式
+batch_results = batch_call_language_model(
+    model_provider='openai',
+    model_name='gpt-4o',
+    requests=batch_requests,
+    max_workers=5,
+    show_progress=False,  # 不显示进度条
+    custom_config={
+        'api_key': 'sk-your-api-key',
+        'base_url': 'https://api.openai.com/v1'
+    }
+)
+```
+
 ## 参数说明
 
 ### `call_language_model` 函数参数
@@ -230,6 +313,23 @@ if not error:
 - `config_path`: 配置文件路径（默认 "./llm_config.yaml"）
 - `custom_config`: 自定义配置字典，包含api_key和base_url，优先于config_path（可选）
 
+### `batch_call_language_model` 函数参数
+
+- `model_provider`: 模型提供商，如 "openai", "aliyun", "volcengine", "ollama"
+- `model_name`: 模型名称，需在配置文件中定义（除非设置skip_model_checking=True）
+- `requests`: 请求列表，每个元素为字典，包含system_prompt, user_prompt和可选的files字段
+  - 格式: `[{"system_prompt": "...", "user_prompt": "...", "files": [...]}, ...]`
+- `max_workers`: 最大并行工作线程数（默认 5）
+- `stream`: 是否流式调用（默认 False），设为True时收集流式响应，不支持真正的流式调用
+- `enable_thinking`: 是否启用推理模式，仅对Qwen3系列模型有效（默认 True）
+- `temperature`: 温度参数，控制输出随机性（可选）
+- `max_tokens`: 最大生成 token 数（可选）
+- `skip_model_checking`: 是否跳过模型名称检查（默认 False）
+- `config_path`: 配置文件路径（默认 "./llm_config.yaml"）
+- `custom_config`: 自定义配置字典，包含api_key和base_url，优先于config_path（可选）
+- `output_file`: 输出JSONL文件路径（可选）。如果提供，将保存所有结果到指定文件
+- `show_progress`: 是否显示进度条（默认 True）
+
 ## 返回值说明
 
 ### `call_language_model` 返回值
@@ -249,6 +349,19 @@ if not error:
 - `embeddings`: 嵌入向量列表，每个元素是一个浮点数列表
 - `tokens_used`: 使用的token数量
 - `error_msg`: 错误信息字符串，成功时为None
+
+### `batch_call_language_model` 返回值
+
+函数返回一个结果字典列表 `List[Dict]`，每个字典包含：
+
+- `request_index`: 请求在输入列表中的索引
+- `request`: 原始请求内容（包含system_prompt, user_prompt, files等）
+- `response_text`: 生成的文本响应（成功时）
+- `tokens_used`: 该请求使用的token数量
+- `error_msg`: 错误信息字符串，成功时为None
+- `model_provider`: 使用的模型提供商
+- `model_name`: 使用的模型名称
+- `timestamp`: 处理完成的时间戳
 
 ## 高级功能
 
@@ -299,11 +412,73 @@ response, tokens, error = call_language_model(
 )
 ```
 
+### 批量处理高级功能
+
+**进度条显示**
+
+批量调用时自动显示处理进度、成功率和失败数：
+
+```python
+# 默认显示进度条
+batch_results = batch_call_language_model(
+    model_provider='openai',
+    model_name='gpt-4o-mini',
+    requests=batch_requests,
+    show_progress=True  # 默认为True
+)
+
+# 关闭进度条（适用于脚本或后台处理）
+batch_results = batch_call_language_model(
+    model_provider='openai',
+    model_name='gpt-4o-mini',
+    requests=batch_requests,
+    show_progress=False
+)
+```
+
+**结果保存到JSONL文件**
+
+```python
+# 保存结果到文件
+batch_results = batch_call_language_model(
+    model_provider='openai',
+    model_name='gpt-4o-mini',
+    requests=batch_requests,
+    output_file="results.jsonl"  # 自动保存到指定文件
+)
+
+# JSONL文件格式示例：
+# {"request_index": 0, "request": {...}, "response_text": "...", "tokens_used": 150, "error_msg": null, "model_provider": "openai", "model_name": "gpt-4o-mini", "timestamp": "2025-01-31 10:30:45"}
+# {"request_index": 1, "request": {...}, "response_text": "...", "tokens_used": 200, "error_msg": null, "model_provider": "openai", "model_name": "gpt-4o-mini", "timestamp": "2025-01-31 10:30:46"}
+```
+
+**读取和分析保存的结果**
+
+```python
+import json
+
+# 读取保存的结果
+def load_batch_results(file_path):
+    results = []
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            results.append(json.loads(line.strip()))
+    return results
+
+# 分析结果
+results = load_batch_results("results.jsonl")
+total_tokens = sum(r['tokens_used'] for r in results if not r['error_msg'])
+success_rate = len([r for r in results if not r['error_msg']]) / len(results) * 100
+print(f"成功率: {success_rate:.1f}%, 总Token使用: {total_tokens}")
+```
+
 ## 注意事项
 
 - 支持 OpenAI 兼容接口和 Ollama 两种主流调用方式
 - **支持真正的流式调用**，设置 `stream=True, collect=False` 可获得实时输出流
+- **支持批量并行调用**，使用 `batch_call_language_model` 函数可同时处理多个请求
 - 支持嵌入模型调用，OpenAI提供商仅支持文本嵌入，Ollama支持多模态嵌入
+- 批量调用模式下不支持真正的流式调用，仅支持收集模式的流式调用
 - 不支持多轮对话
 - Qwen3系列模型支持推理模式（`enable_thinking`参数）
 - 流式调用时无法准确统计token消耗，直接返回0
@@ -335,16 +510,37 @@ all_models:
 ### 示例：批量文本处理
 
 ```python
+from call_language_model import batch_call_language_model
+
+# 准备批量文本处理请求
 texts = ["文本1", "文本2", "文本3"]
-results = []
+batch_requests = []
 
 for text in texts:
-    response, tokens, error = call_language_model(
-        model_provider='openai',
-        model_name='gpt-4o-mini',
-        system_prompt="请总结以下内容",
-        user_prompt=text
-    )
-    if not error:
-        results.append(response)
+    batch_requests.append({
+        "system_prompt": "请总结以下内容",
+        "user_prompt": text
+    })
+
+# 使用批量调用功能（带进度条和文件保存）
+results = batch_call_language_model(
+    model_provider='openai',
+    model_name='gpt-4o-mini',
+    requests=batch_requests,
+    max_workers=3,  # 并行处理3个请求
+    temperature=0.7,
+    output_file="text_summaries.jsonl",  # 保存结果
+    show_progress=True  # 显示进度条
+)
+
+# 处理结果
+successful_results = []
+for result in results:
+    if not result['error_msg']:
+        successful_results.append(result['response_text'])
+        print(f"文本 {result['request_index'] + 1} 处理完成，使用 {result['tokens_used']} tokens")
+    else:
+        print(f"文本 {result['request_index'] + 1} 处理失败: {result['error_msg']}")
+
+print(f"成功处理 {len(successful_results)} 个文本")
 ```
