@@ -1,23 +1,29 @@
-# ！/usr/bin/python3
-# -*- coding: UTF-8 -*-
-"""
-@File    :  call_language_model.py
-@Author  :  Zhangxiao Shen
-@Date    :  2025/7/31
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""Language model API unified calling tool.
+
+This module provides a unified interface for calling various language models
+and embedding models through OpenAI-compatible APIs and Ollama.
+
+@File    : call_language_model.py
+@Author  : Zhangxiao Shen
+@Date    : 2025/7/31
 @Description: Call language models and embedding models using OpenAI or Ollama APIs.
 """
 
-import yaml
-import logging
-import time
+import base64
 import json
-from typing import Optional, Dict, List, Union
+import logging
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Union
+
+import ollama
+import yaml
 from openai import OpenAI
 from openai.types.chat import ChatCompletion
-import base64
-import ollama
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 # 配置文件格式：llm_config.yaml，需要放在检查本文件所在路径内或者指定其路径
 # 当前支持多种模型提供商，也可自行添加提供商和模型名称，但仅支持openai和ollama两种渠道调用模型
@@ -27,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # 支持使用嵌入模型，需使用call_embedding_model函数调用，暂不支持多模态嵌入
 # 支持批量并行调用大语言模型，使用batch_call_language_model函数，该模式下不支持真正的流式调用
 # 批量调用支持tqdm进度条显示和结果保存到JSONL文件
+
 # 处理OpenAI真流式响应的示例代码
 #     is_first_chunk = True
 #     for chunk in response:
@@ -80,22 +87,52 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #     model_name: ["nomic-embed-text", "mxbai-embed-large"]
 #     base_url: "http://localhost:11434"
 
+# Constants
+DEFAULT_CONFIG_PATH = './llm_config.yaml'
+DEFAULT_LOG_FILE = './model_api.log'
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_DELAY = 10
 
-# 日志配置
+# Logging configuration
 logging.basicConfig(
-    filename='./model_api.log',
+    filename=DEFAULT_LOG_FILE,
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
 
 class ModelConfig:
-    """模型配置管理器"""
+    """Model configuration manager.
+    
+    Manages loading and accessing model configurations from YAML files.
+    Supports both language models and embedding models with provider validation.
+    """
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str) -> None:
+        """Initialize ModelConfig with configuration file path.
+        
+        Args:
+            config_path: Path to the YAML configuration file.
+            
+        Raises:
+            FileNotFoundError: If configuration file doesn't exist.
+            AttributeError: If configuration file format is invalid.
+        """
         self.config = self._load_config(config_path)
 
     def _load_config(self, path: str) -> Dict:
+        """Load configuration from YAML file.
+        
+        Args:
+            path: Path to the YAML configuration file.
+            
+        Returns:
+            Dictionary containing the loaded configuration.
+            
+        Raises:
+            FileNotFoundError: If configuration file doesn't exist.
+            AttributeError: If configuration file format is invalid.
+        """
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 return yaml.safe_load(f)
@@ -107,30 +144,39 @@ class ModelConfig:
             raise AttributeError(f"Config file in wrong format: {path}")
 
     def get_credentials(self, model_provider: str, model_name: str, skip_checking: bool = False) -> Dict:
-        """获取模型凭证"""
+        """Get model credentials and configuration.
+        
+        Args:
+            model_provider: Provider name (e.g., 'openai', 'ollama').
+            model_name: Name of the model to get credentials for.
+            skip_checking: If True, skip model name validation.
+            
+        Returns:
+            Dictionary containing model configuration including credentials.
+        """
         try:
-            # 提取 all_models 列表
+            # Extract all_models list
             all_models = self.config.get('all_models', [])
 
-            # 如果跳过检查，直接查找第一个匹配的provider并返回
+            # If skip checking, find first matching provider and return
             if skip_checking:
                 for model_info in all_models:
                     if model_info.get('provider') == model_provider:
-                        model_info = model_info.copy()  # 创建副本避免修改原配置
+                        model_info = model_info.copy()  # Create copy to avoid modifying original config
                         model_info['model_name'] = model_name
                         return model_info
                 logging.warning(f"No configuration found for provider '{model_provider}'")
                 return {}
 
             else:
-                # 遍历 all_models 列表，检查 provider 和 model_name 是否合法
+                # Iterate through all_models list, check if provider and model_name are valid
                 for model_info in all_models:
                     if model_info.get('provider') == model_provider:
                         if model_name in model_info.get('model_name', []):
-                            model_info = model_info.copy()  # 创建副本避免修改原配置
+                            model_info = model_info.copy()  # Create copy to avoid modifying original config
                             model_info['model_name'] = model_name
-                            return model_info  # 返回匹配的模型配置
-                # 如果没有找到匹配的 provider 或 model_name，记录警告并返回空字典
+                            return model_info  # Return matching model configuration
+                # If no matching provider or model_name found, log warning and return empty dict
                 logging.warning(f"No valid configuration found for provider '{model_provider}' and model name '{model_name}'")
                 return {}
 
@@ -139,30 +185,39 @@ class ModelConfig:
             return {}
             
     def get_embedding_credentials(self, model_provider: str, model_name: str, skip_checking: bool = False) -> Dict:
-        """获取嵌入模型凭证"""
+        """Get embedding model credentials and configuration.
+        
+        Args:
+            model_provider: Provider name (e.g., 'openai', 'ollama').
+            model_name: Name of the embedding model to get credentials for.
+            skip_checking: If True, skip model name validation.
+            
+        Returns:
+            Dictionary containing embedding model configuration including credentials.
+        """
         try:
-            # 提取 embedding_models 列表
+            # Extract embedding_models list
             embedding_models = self.config.get('embedding_models', [])
 
-            # 如果跳过检查，直接查找第一个匹配的provider并返回
+            # If skip checking, find first matching provider and return
             if skip_checking:
                 for model_info in embedding_models:
                     if model_info.get('provider') == model_provider:
-                        model_info = model_info.copy()  # 创建副本避免修改原配置
+                        model_info = model_info.copy()  # Create copy to avoid modifying original config
                         model_info['model_name'] = model_name
                         return model_info
                 logging.warning(f"No embedding configuration found for provider '{model_provider}'")
                 return {}
 
-            # 遍历 embedding_models 列表，检查 provider 和 model_name 是否合法
+            # Iterate through embedding_models list, check if provider and model_name are valid
             for model_info in embedding_models:
                 if model_info.get('provider') == model_provider:
                     if model_name in model_info.get('model_name', []):
-                        model_info = model_info.copy()  # 创建副本避免修改原配置
+                        model_info = model_info.copy()  # Create copy to avoid modifying original config
                         model_info['model_name'] = model_name
-                        return model_info  # 返回匹配的模型配置
+                        return model_info  # Return matching model configuration
 
-            # 如果没有找到匹配的 provider 或 model_name，记录警告并返回空字典
+            # If no matching provider or model_name found, log warning and return empty dict
             logging.warning(f"No valid embedding configuration found for provider '{model_provider}' and model name '{model_name}'")
             return {}
 
@@ -171,9 +226,18 @@ class ModelConfig:
             return {}
 
 class BaseModel:
-    """模型基类"""
+    """Base class for all model implementations.
+    
+    Provides common interface for language model generation across different providers.
+    All model implementations should inherit from this class and implement the required methods.
+    """
 
-    def __init__(self, credentials: Dict):
+    def __init__(self, credentials: Dict) -> None:
+        """Initialize BaseModel with credentials.
+        
+        Args:
+            credentials: Dictionary containing API credentials and configuration.
+        """
         self.credentials = credentials
 
     def generate(
@@ -184,14 +248,39 @@ class BaseModel:
             max_tokens: Optional[int] = None,
             enable_thinking: Optional[bool] = None,
             files: Optional[List[str]] = None
-    ) -> (str, int, str):
+    ) -> tuple[str, int, str]:
+        """Generate text response from the model.
+        
+        Args:
+            system_prompt: System instruction for the model.
+            user_prompt: User input text.
+            temperature: Sampling temperature (0.0 to 2.0).
+            max_tokens: Maximum tokens in response.
+            enable_thinking: Whether to enable reasoning mode.
+            files: List of file paths for multimodal input.
+            
+        Returns:
+            Tuple containing (response_text, status_code, error_message).
+            
+        Raises:
+            NotImplementedError: Must be implemented by subclasses.
+        """
         raise NotImplementedError
 
 
 class OpenAIModel(BaseModel):
-    """OpenAI 在线模型处理"""
+    """OpenAI-compatible model handler.
+    
+    Handles text and multimodal interactions with OpenAI-compatible APIs
+    including OpenAI, Alibaba Cloud, Volcengine, and other compatible providers.
+    """
 
-    def __init__(self, credentials: Dict):
+    def __init__(self, credentials: Dict) -> None:
+        """Initialize OpenAI model with credentials.
+        
+        Args:
+            credentials: Dictionary containing API credentials and configuration.
+        """
         super().__init__(credentials)
         self.client = OpenAI(
             api_key=credentials.get('api_key', ''),
@@ -199,7 +288,14 @@ class OpenAIModel(BaseModel):
         )
 
     def _encode_image(self, image_path: str) -> str:
-        # 将图片编码为base64字符串，并且直接以openai api需要的格式返回
+        """Encode image to base64 string in OpenAI API format.
+        
+        Args:
+            image_path: Path to the image file.
+            
+        Returns:
+            Base64 encoded string with data URL format for OpenAI API.
+        """
         with open(image_path, "rb") as img_file:
             base64_str = base64.b64encode(img_file.read()).decode('utf-8')
             img_format = img_file.name.split('.')[-1]
@@ -207,10 +303,19 @@ class OpenAIModel(BaseModel):
             return result_str
 
     def _prepare_messages(self, **kwargs) -> list:
-        """准备消息格式，供普通和流式调用共用"""
+        """Prepare message format for OpenAI API calls.
+        
+        Handles both text-only and multimodal (text + images) requests.
+        
+        Args:
+            **kwargs: Keyword arguments containing system_prompt, user_prompt, and optional files.
+            
+        Returns:
+            List of message dictionaries formatted for OpenAI API.
+        """
         messages = [{"role": "system", "content": kwargs['system_prompt']}]
         if kwargs.get('files'):
-            # 处理多模态请求
+            # Handle multimodal requests
             messages.append({
                 "role": "user",
                 "content": [
@@ -223,9 +328,19 @@ class OpenAIModel(BaseModel):
         return messages
 
     def _prepare_params(self, messages, **kwargs) -> dict:
-        """准备API参数，供普通和流式调用共用"""
+        """Prepare API parameters for OpenAI API calls.
+        
+        Handles model-specific configurations and filters out None values.
+        
+        Args:
+            messages: List of message dictionaries.
+            **kwargs: Additional parameters like temperature, max_tokens, etc.
+            
+        Returns:
+            Dictionary of API parameters with None values filtered out.
+        """
         if "qwen3" in str(self.credentials.get('model_name')):
-            enable_thinking  = kwargs.get('enable_thinking', True)
+            enable_thinking = kwargs.get('enable_thinking', True)
             extra_body = {"enable_thinking": enable_thinking}
         else:
             extra_body = None
@@ -238,8 +353,15 @@ class OpenAIModel(BaseModel):
         }
         return {k: v for k, v in params.items() if v is not None}
 
-    def generate(self, **kwargs) -> (str, int, str):
-        """非流式生成回复"""
+    def generate(self, **kwargs) -> tuple[str, int, str]:
+        """Generate non-streaming response.
+        
+        Args:
+            **kwargs: Keyword arguments including system_prompt, user_prompt, etc.
+            
+        Returns:
+            Tuple containing (response_text, status_code, error_message).
+        """
         messages = self._prepare_messages(**kwargs)
         params = self._prepare_params(messages, **kwargs)
 
@@ -277,9 +399,17 @@ class OpenAIModel(BaseModel):
                     logging.error(error_msg)
                     return "", 0, error_msg
 
-    def generate_stream(self, **kwargs) -> (str, int, str):
-        """流式生成回复，设置collect为True返回格式与非流式相同，否则返回整个流
-        返回: (响应, token数量, 错误信息(如果有))
+    def generate_stream(self, **kwargs) -> tuple[str, int, str]:
+        """Generate streaming response.
+        
+        Supports both collected (returns final result) and streaming modes.
+        When collect=True, returns format same as non-streaming, otherwise returns stream object.
+        
+        Args:
+            **kwargs: Keyword arguments including system_prompt, user_prompt, collect, etc.
+            
+        Returns:
+            Tuple containing (response_text, status_code, error_message).
         """
         messages = self._prepare_messages(**kwargs)
         params = self._prepare_params(messages, **kwargs)
@@ -343,7 +473,15 @@ class OpenAIModel(BaseModel):
                     logging.error(error_msg)
                     return complete_response, int(estimated_tokens), error_msg
 
-    def _parse_response(self, response: ChatCompletion) -> (str, int, str):
+    def _parse_response(self, response: ChatCompletion) -> tuple[str, int, str]:
+        """Parse OpenAI API response.
+        
+        Args:
+            response: ChatCompletion response object from OpenAI API.
+            
+        Returns:
+            Tuple containing (response_text, token_count, error_message).
+        """
         complete_response = response.choices[0].message.content
         if hasattr(response.choices[0].message, 'reasoning_content'):
             complete_response = "<think>\n" + str(response.choices[0].message.reasoning_content) + "\n</think>\n\n" + \
@@ -356,18 +494,37 @@ class OpenAIModel(BaseModel):
 
 
 class OllamaModel(BaseModel):
-    """Ollama 本地模型处理"""
+    """Ollama local model handler.
+    
+    Handles interactions with locally hosted Ollama models including multimodal support.
+    """
 
     def _encode_image(self, image_path: str) -> str:
+        """Encode image to base64 string for Ollama API.
+        
+        Args:
+            image_path: Path to the image file.
+            
+        Returns:
+            Base64 encoded string of the image.
+        """
         with open(image_path, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode('utf-8')
 
-    def generate(self, **kwargs) -> (str, int, str):
-        # 构造消息
+    def generate(self, **kwargs) -> tuple[str, int, str]:
+        """Generate non-streaming response from Ollama model.
+        
+        Args:
+            **kwargs: Keyword arguments including system_prompt, user_prompt, etc.
+            
+        Returns:
+            Tuple containing (response_text, status_code, error_message).
+        """
+        # Construct messages
         messages = [{"role": "system", "content": kwargs.get('system_prompt')}]
         user_prompt_content = kwargs.get('user_prompt')
         if "qwen3" in str(self.credentials.get('model_name')):
-            enable_thinking  = kwargs.get('enable_thinking', True)
+            enable_thinking = kwargs.get('enable_thinking', True)
             if not enable_thinking:
                 user_prompt_content += " /no_think"
         else:
@@ -375,7 +532,7 @@ class OllamaModel(BaseModel):
 
         if kwargs.get('files'):
             image_encoded = [self._encode_image(f) for f in kwargs['files']]
-            # 处理多模态请求
+            # Handle multimodal requests
             messages.append({
                 "role": "user",
                 "content": user_prompt_content,
@@ -389,15 +546,14 @@ class OllamaModel(BaseModel):
             "num_predict": kwargs.get('max_tokens')
         }
 
-        # 移除None值
+        # Remove None values
         options = {k: v for k, v in options.items() if v is not None}
 
         try:
-            # response = requests.post(url, json=payload)
             response = ollama.chat(
-                model = self.credentials.get('model_name', 'llama3.1:8b'),
-                messages = messages,
-                options = options,
+                model=self.credentials.get('model_name', 'llama3.1:8b'),
+                messages=messages,
+                options=options,
             )
             return self._parse_response(response, enable_thinking)
         except Exception as e:
@@ -405,14 +561,22 @@ class OllamaModel(BaseModel):
             print(f"Ollama API error: {str(e)}")
             return "", 0, str(e)
 
-    def generate_stream(self, **kwargs) -> (str, int, str):
-        """流式生成回复，设置collect为True返回格式与非流式相同，否则返回整个流
-        返回: (响应, token数量, 错误信息(如果有))
+    def generate_stream(self, **kwargs) -> tuple[str, int, str]:
+        """Generate streaming response from Ollama model.
+        
+        Supports both collected (returns final result) and streaming modes.
+        When collect=True, returns format same as non-streaming, otherwise returns stream object.
+        
+        Args:
+            **kwargs: Keyword arguments including system_prompt, user_prompt, collect, etc.
+            
+        Returns:
+            Tuple containing (response_text, status_code, error_message).
         """
-        # 构造消息
+        # Construct messages
         messages = [{"role": "system", "content": kwargs.get('system_prompt')}]
         if "qwen3" in str(self.credentials.get('model_name')):
-            enable_thinking  = kwargs.get('enable_thinking', True)
+            enable_thinking = kwargs.get('enable_thinking', True)
             if not enable_thinking:
                 user_prompt_content += " /no_think"
         else:
@@ -420,7 +584,7 @@ class OllamaModel(BaseModel):
 
         if kwargs.get('files'):
             image_encoded = [self._encode_image(f) for f in kwargs['files']]
-            # 处理多模态请求
+            # Handle multimodal requests
             messages.append({
                 "role": "user",
                 "content": kwargs.get('user_prompt'),
@@ -434,7 +598,7 @@ class OllamaModel(BaseModel):
             "num_predict": kwargs.get('max_tokens'),
         }
 
-        # 移除None值
+        # Remove None values
         options = {k: v for k, v in options.items() if v is not None}
 
         complete_response = ""
@@ -445,30 +609,30 @@ class OllamaModel(BaseModel):
 
         collect_stream_answer = kwargs.get('collect', True)
 
-        # 删除collect参数，避免Ollama API报错
+        # Remove collect parameter to avoid Ollama API error
         if 'collect' in kwargs:
             del kwargs['collect']
 
         for attempt in range(max_retries):
             try:
                 stream = ollama.chat(
-                    model = self.credentials.get('model_name', 'llama3.1:8b'),
-                    messages = messages,
-                    options = options,
-                    stream = True,
+                    model=self.credentials.get('model_name', 'llama3.1:8b'),
+                    messages=messages,
+                    options=options,
+                    stream=True,
                 )
 
                 if not collect_stream_answer:
-                    # 如果不收集流式结果，直接返回stream对象
+                    # If not collecting stream results, return stream object directly
                     return stream, 0, None
                 else:
-                    # 收集流式结果
+                    # Collect streaming results
                     for chunk in stream:
                         if hasattr(chunk, 'message') and chunk.message and hasattr(chunk.message, 'content'):
                             content = chunk.message.content
                             complete_response += content
 
-                    # 注意流式调用不支持精确token消耗统计
+                    # Note: streaming calls don't support precise token consumption statistics
                     tokens = 0
                     if hasattr(stream, 'eval_count') and hasattr(stream, 'prompt_eval_count'):
                         tokens = stream.eval_count + stream.prompt_eval_count
@@ -496,7 +660,7 @@ class OllamaModel(BaseModel):
                     logging.error(error_msg)
                     return complete_response, int(estimated_tokens), error_msg
 
-    def _parse_response(self, response, enable_thinking) -> (str, int, str):
+    def _parse_response(self, response, enable_thinking) -> tuple[str, int, str]:
         tokens_used = response.eval_count + response.prompt_eval_count
         complete_response = response.message.content
         if not enable_thinking:
@@ -507,26 +671,45 @@ class OllamaModel(BaseModel):
             None
         )
 
-# 添加嵌入模型基类
+
 class BaseEmbeddingModel:
-    """嵌入模型基类"""
+    """Base class for embedding model implementations.
     
-    def __init__(self, credentials: Dict):
+    Provides common interface for embedding generation across different providers.
+    All embedding model implementations should inherit from this class.
+    """
+    
+    def __init__(self, credentials: Dict) -> None:
         self.credentials = credentials
         
     def generate_embeddings(
             self,
             text: Union[str, List[str]],
             files: Optional[List[str]] = None
-    ) -> (List[List[float]], int, str):
-        """生成嵌入向量的基础方法"""
+    ) -> tuple[List[List[float]], int, str]:
+        """Generate embedding vectors.
+        
+        Args:
+            text: Input text(s) to generate embeddings for.
+            files: Optional list of file paths for multimodal embeddings.
+            
+        Returns:
+            Tuple containing (embeddings, status_code, error_message).
+            
+        Raises:
+            NotImplementedError: Must be implemented by subclasses.
+        """
         raise NotImplementedError
 
 
 class OpenAIEmbeddingModel(BaseEmbeddingModel):
-    """OpenAI 嵌入模型处理"""
+    """OpenAI embedding model handler.
     
-    def __init__(self, credentials: Dict):
+    Handles text embedding generation using OpenAI's embedding models.
+    Note: Only supports text embeddings, not multimodal embeddings.
+    """
+    
+    def __init__(self, credentials: Dict) -> None:
         super().__init__(credentials)
         self.client = OpenAI(
             api_key=credentials.get('api_key'),
@@ -534,7 +717,14 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
         )
         
     def _encode_image(self, image_path: str) -> str:
-        """将图片编码为base64字符串，直接以OpenAI API需要的格式返回"""
+        """Encode image to base64 string in OpenAI API format.
+        
+        Args:
+            image_path: Path to the image file.
+            
+        Returns:
+            Base64 encoded string with data URL format.
+        """
         with open(image_path, "rb") as img_file:
             base64_str = base64.b64encode(img_file.read()).decode('utf-8')
             img_format = img_file.name.split('.')[-1]
@@ -545,20 +735,22 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
             self,
             text: Union[str, List[str]],
             files: Optional[List[str]] = None
-    ) -> (List[List[float]], int, str):
-        """生成嵌入向量，注意只支持文本，不支持多模态嵌入
+    ) -> tuple[List[List[float]], int, str]:
+        """Generate embedding vectors for text input.
+        
+        Note: Only supports text embeddings, not multimodal embeddings.
         
         Args:
-            text: 单个文本字符串或文本列表
-            files: 图片文件路径列表，可选
+            text: Single text string or list of text strings.
+            files: List of image file paths, optional (not supported by OpenAI).
             
         Returns:
-            (embeddings, tokens_used, error_msg)
+            Tuple containing (embeddings, tokens_used, error_message).
         """
         max_retries = 3
         retry_delay = 10
         
-        # 确保text是列表形式
+        # Ensure text is in list format
         if isinstance(text, str):
             input_texts = [text]
         else:
@@ -568,7 +760,6 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
             
         for attempt in range(max_retries):
             try:
-                
                 response = self.client.embeddings.create(
                     model=self.credentials.get('model_name'),
                     input=input_data,
@@ -600,13 +791,23 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
 
 
 class OllamaEmbeddingModel(BaseEmbeddingModel):
-    """Ollama 嵌入模型处理"""
+    """Ollama embedding model handler.
     
-    def __init__(self, credentials: Dict):
+    Handles text and multimodal embedding generation using Ollama models.
+    """
+    
+    def __init__(self, credentials: Dict) -> None:
         super().__init__(credentials)
         
     def _encode_image(self, image_path: str) -> str:
-        """将图片编码为base64字符串"""
+        """Encode image to base64 string.
+        
+        Args:
+            image_path: Path to the image file.
+            
+        Returns:
+            Base64 encoded string of the image.
+        """
         with open(image_path, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode('utf-8')
         
@@ -614,20 +815,20 @@ class OllamaEmbeddingModel(BaseEmbeddingModel):
             self,
             text: Union[str, List[str]],
             files: Optional[List[str]] = None
-    ) -> (List[List[float]], int, str):
-        """生成文本或多模态嵌入向量
+    ) -> tuple[List[List[float]], int, str]:
+        """Generate text or multimodal embedding vectors.
         
         Args:
-            text: 单个文本字符串或文本列表
-            files: 图片文件路径列表，可选
+            text: Single text string or list of text strings.
+            files: List of image file paths, optional.
             
         Returns:
-            (embeddings, tokens_used, error_msg)
+            Tuple containing (embeddings, tokens_used, error_message).
         """
         max_retries = 3
         retry_delay = 10
         
-        # 确保text是列表形式
+        # Ensure text is in list format
         if isinstance(text, str):
             input_texts = [text]
         else:
@@ -637,32 +838,32 @@ class OllamaEmbeddingModel(BaseEmbeddingModel):
         total_tokens = 0
         
         for t in input_texts:
-            # 准备请求参数
+            # Prepare request parameters
             params = {
                 "model": self.credentials.get('model_name', 'nomic-embed-text'),
                 "prompt": t,
             }
             
-            # 添加图片（如果有）
+            # Add images (if any)
             if files:
                 params["images"] = files
                 
             for attempt in range(max_retries):
                 try:
-                    # 调用Ollama API生成嵌入向量
+                    # Call Ollama API to generate embedding vectors
                     response = ollama.embeddings(**params)
                     
-                    # 提取嵌入向量
+                    # Extract embedding vectors
                     if hasattr(response, 'embedding'):
                         all_embeddings.append(response.embedding)
                     else:
                         all_embeddings.append(response)
                         
-                    # Ollama可能不提供token使用量
+                    # Ollama may not provide token usage
                     if hasattr(response, 'eval_count'):
                         total_tokens += response.eval_count
                         
-                    break  # 成功获取嵌入向量，跳出重试循环
+                    break  # Successfully obtained embedding vectors, exit retry loop
                     
                 except Exception as e:
                     str_e = str(e).lower()
@@ -699,36 +900,43 @@ def call_language_model(
         skip_model_checking: bool = False,
         config_path: Optional[str] = r'./llm_config.yaml',
         custom_config: Optional[Dict] = None,
-) -> (str, int, str):
+) -> tuple[str, int, str]:
+    """Unified entry function for calling language models.
+    
+    Import this function into your code to use. Do not use this function to call embedding models.
+    
+    Args:
+        model_provider: Model provider like "openai", "aliyun", "volcengine", "ollama".
+        model_name: Model name, note that some providers may include version numbers.
+        system_prompt: System instruction.
+        user_prompt: User input text.
+        stream: Whether to use streaming mode, optional.
+        collect: Whether to collect streaming results (only effective when stream=True).
+                Default True for collected results, False for true streaming requiring manual collection.
+        enable_thinking: Whether to enable reasoning mode (only effective for Qwen3 series, default True).
+        temperature: Sampling temperature, optional.
+        max_tokens: Maximum tokens to generate, optional.
+        files: List of image file paths, optional.
+        skip_model_checking: Whether to skip model name validation (default False).
+                            When True, uses provided model name directly without checking configuration.
+        config_path: Configuration file path, mutually exclusive with custom_config.
+        custom_config: Custom configuration dict instead of file, mutually exclusive with config_path.
+                      Must contain base_url and api_key fields. Overrides config_path when valid.
+        
+    Returns:
+        Tuple containing (response_text, tokens_used, error_message).
+        For streaming: returns stream object when collect=False, otherwise collected result.
     """
-    调用语言模型的统一入口函数，将此函数import到代码中即可使用，请勿通过此函数调用嵌入模型
-    :param model_provider: 模型提供商，如"openai","aliyun","volcengine","ollama"，不区分在线和本地
-    :param model_name: 模型名称，注意部分提供商的模型名称可能包含版本号
-    :param system_prompt: 系统提示
-    :param user_prompt: 用户提示
-    :param stream: 是否流式调用，可选
-    :param collect: 是否收集流式调用的结果，仅在stream为True时有效，默认为True，设为False为真流式调用，需要自行收集结果
-    :param enable_thinking: 是否启用推理，仅对Qwen3系列模型有效且默认为True，其余模型该参数将被忽略
-    :param temperature: 温度参数，可选
-    :param max_tokens: 最大生成token数，可选
-    :param files: 图片文件路径列表，可选
-    :param skip_model_checking: 是否跳过模型包含列表检查，默认为False，设为True时将直接使用提供的模型名称，不检查是否在配置文件中，但仍然进行提供商检查
-    :param config_path: 配置文件路径，与custom_config二选一
-    :param custom_config: 通过自定义配置字典而非配置文件配置模型，与config_path二选一，需包含base_url和api_key字段，当有效时将覆盖config_path
-    :return: 
-    一般：(response_text, tokens_used, error_msg)
-    真流式输出时：(response_stream, tokens_used, error_msg)
-    """
-    # 验证参数：config_path和custom_config不能同时为空
+    # Validate parameters: config_path and custom_config cannot both be None
     if config_path is None and custom_config is None:
         error_msg = "Both config_path and custom_config cannot be None. Please provide either a config file path or custom configuration."
         print(error_msg)
         logging.error(error_msg)
         return "", 0, error_msg
 
-    # 初始化
+    # Initialize
     if custom_config is not None:
-        # 使用自定义配置
+        # Use custom configuration
         credentials = {
             'provider': model_provider,
             'model_name': model_name,
@@ -736,7 +944,7 @@ def call_language_model(
             'base_url': custom_config.get('base_url', '')
         }
     else:
-        # 使用配置文件
+        # Use configuration file
         config = ModelConfig(config_path)
         credentials = config.get_credentials(model_provider, model_name, skip_model_checking)
 
@@ -779,7 +987,7 @@ def call_language_model(
                 enable_thinking=enable_thinking,
                 files=files
             )
-        # 记录成功日志
+        # Log successful API call
         _, tokens, _ = result
         logging.info(f"API call succeeded. Model: {model_name}, Provider: {model_provider}, Tokens used: {tokens}")
         return result
@@ -798,29 +1006,34 @@ def call_embedding_model(
         skip_model_checking: bool = False,
         config_path: Optional[str] = r'./llm_config.yaml',
         custom_config: Optional[Dict] = None,
-) -> (List[List[float]], int, str):
+) -> tuple[List[List[float]], int, str]:
+    """Unified entry function for generating embedding vectors.
+    
+    Import this function into your code to use. Does not support streaming calls.
+    Only supports embedding models, do not pass language dialog models to this function.
+    
+    Args:
+        model_provider: Model provider like "openai" or "ollama".
+        model_name: Embedding model name.
+        text: Single text string or list of text strings.
+        files: List of image file paths, optional.
+        skip_model_checking: Whether to skip model name validation (default False).
+        config_path: Configuration file path, mutually exclusive with custom_config.
+        custom_config: Custom configuration dict instead of file, mutually exclusive with config_path.
+        
+    Returns:
+        Tuple containing (embeddings, tokens_used, error_message).
     """
-    生成嵌入向量的统一入口函数，将此函数import到代码中即可使用。不支持流式调用。
-    仅支持嵌入模型，请不要将语言对话模型传入此函数。
-    :param model_provider: 模型提供商，如"openai"或"ollama"
-    :param model_name: 嵌入模型名称
-    :param text: 单个文本字符串或文本列表
-    :param files: 图片文件路径列表，可选
-    :param skip_model_checking: 是否跳过模型包含列表检查，默认为False，设为True时将直接使用提供的模型名称，不检查是否在配置文件中，但仍然进行提供商检查
-    :param config_path: 配置文件路径，与custom_config二选一
-    :param custom_config: 通过自定义配置字典而非配置文件配置模型，与config_path二选一，需包含base_url和api_key字段，当有效时将覆盖config_path
-    :return: (embeddings, tokens_used, error_msg)
-    """
-    # 验证参数：config_path和custom_config不能同时为空
+    # Validate parameters: config_path and custom_config cannot both be None
     if config_path is None and custom_config is None:
         error_msg = "Both config_path and custom_config cannot be None. Please provide either a config file path or custom configuration."
         print(error_msg)
         logging.error(error_msg)
         return [], 0, error_msg
 
-    # 初始化
+    # Initialize
     if custom_config is not None:
-        # 使用自定义配置
+        # Use custom configuration
         credentials = {
             'provider': model_provider,
             'model_name': model_name,
@@ -828,7 +1041,7 @@ def call_embedding_model(
             'base_url': custom_config.get('base_url', '')
         }
     else:
-        # 使用配置文件
+        # Use configuration file
         config = ModelConfig(config_path)
         credentials = config.get_embedding_credentials(model_provider, model_name, skip_model_checking)
 
@@ -856,7 +1069,7 @@ def call_embedding_model(
             text=text,
             files=files
         )
-        # 记录成功日志
+        # Log successful API call
         embeddings, tokens, error = result
         logging.info(f"Embedding API call succeeded. Model: {model_name}, Provider: {model_provider}, Tokens used: {tokens}")
         return result
@@ -882,23 +1095,28 @@ def batch_call_language_model(
         output_file: Optional[str] = None,
         show_progress: bool = True,
 ) -> List[Dict]:
-    """
-    批量并行调用语言模型的统一入口函数。该模式下不支持真正的流式调用。
-    :param model_provider: 模型提供商，如"openai","aliyun","volcengine","ollama"，不区分在线和本地
-    :param model_name: 模型名称，注意部分提供商的模型名称可能包含版本号
-    :param requests: 请求列表，每个元素为字典，包含system_prompt, user_prompt和可选的files字段
-                    格式: [{"system_prompt": "...", "user_prompt": "...", "files": [...]}, ...]
-    :param max_workers: 最大并行工作线程数，默认为5
-    :param stream: 是否流式调用，默认为False，当设为True时将收集并返回流式响应，不支持真正的流式调用
-    :param enable_thinking: 是否启用推理，仅对Qwen3系列模型有效且默认为True，其余模型该参数将被忽略
-    :param temperature: 温度参数，可选
-    :param max_tokens: 最大生成token数，可选
-    :param skip_model_checking: 是否跳过模型包含列表检查，默认为False
-    :param config_path: 配置文件路径，与custom_config二选一
-    :param custom_config: 通过自定义配置字典而非配置文件配置模型，与config_path二选一
-    :param output_file: 输出JSONL文件路径，可选。如果提供，将保存所有结果到指定文件
-    :param show_progress: 是否显示进度条，默认为True
-    :return: 结果列表，每个元素为字典，包含request_index, response_text, tokens_used, error_msg字段
+    """Batch parallel calling language model unified entry function.
+    
+    This mode does not support true streaming calls.
+    
+    Args:
+        model_provider: Model provider like "openai", "aliyun", "volcengine", "ollama".
+        model_name: Model name, note that some providers may include version numbers.
+        requests: List of request dictionaries containing system_prompt, user_prompt and optional files field.
+                 Format: [{"system_prompt": "...", "user_prompt": "...", "files": [...]}, ...]
+        max_workers: Maximum number of parallel worker threads (default 5).
+        stream: Whether to use streaming mode (default False). When True, collects and returns streaming responses.
+        enable_thinking: Whether to enable reasoning mode (only effective for Qwen3 series, default True).
+        temperature: Sampling temperature, optional.
+        max_tokens: Maximum tokens to generate, optional.
+        skip_model_checking: Whether to skip model name validation (default False).
+        config_path: Configuration file path, mutually exclusive with custom_config.
+        custom_config: Custom configuration dict instead of file, mutually exclusive with config_path.
+        output_file: Output JSONL file path, optional. If provided, saves all results to specified file.
+        show_progress: Whether to show progress bar (default True).
+        
+    Returns:
+        List of result dictionaries containing request_index, response_text, tokens_used, error_msg fields.
     """
     if not requests:
         logging.warning("Empty requests list provided in batch_call_language_model.")
@@ -906,7 +1124,7 @@ def batch_call_language_model(
 
     from tqdm import tqdm
 
-    # 验证请求格式
+    # Validate request format
     for i, req in enumerate(requests):
         if not isinstance(req, dict):
             error_msg = f"Request {i} is not a dictionary"
@@ -919,7 +1137,7 @@ def batch_call_language_model(
             return [{"request_index": i, "response_text": "", "tokens_used": 0, "error_msg": error_msg} for i in range(len(requests))]
 
     def _process_single_request(request_data):
-        """处理单个请求的内部函数"""
+        """Process single request internal function."""
         index, request = request_data
         try:
             response, tokens, error = call_language_model(
@@ -940,7 +1158,7 @@ def batch_call_language_model(
             
             result = {
                 "request_index": index,
-                "request": request,  # 保存原始请求
+                "request": request,  # Save original request
                 "response_text": response,
                 "tokens_used": tokens,
                 "error_msg": error,
@@ -965,30 +1183,30 @@ def batch_call_language_model(
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
             }
 
-    # 使用线程池并行处理请求
-    results = [None] * len(requests)  # 预分配结果列表
+    # Use thread pool for parallel request processing
+    results = [None] * len(requests)  # Pre-allocate results list
     
-    # 创建进度条
+    # Create progress bar
     if show_progress:
         pbar = tqdm(total=len(requests), desc="Processing requests", unit="req")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # 提交所有任务
+        # Submit all tasks
         future_to_index = {
             executor.submit(_process_single_request, (i, req)): i 
             for i, req in enumerate(requests)
         }
         
-        # 收集结果
+        # Collect results
         for future in as_completed(future_to_index):
             try:
                 result = future.result()
                 results[result["request_index"]] = result
                 
-                # 更新进度条
+                # Update progress bar
                 if show_progress:
                     pbar.update(1)
-                    # 显示当前状态信息
+                    # Display current status information
                     successful = sum(1 for r in results if r and not r.get("error_msg"))
                     failed = sum(1 for r in results if r and r.get("error_msg"))
                     pbar.set_postfix({"Success": successful, "Failed": failed})
@@ -1008,18 +1226,18 @@ def batch_call_language_model(
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
                 
-                # 更新进度条
+                # Update progress bar
                 if show_progress:
                     pbar.update(1)
                     successful = sum(1 for r in results if r and not r.get("error_msg"))
                     failed = sum(1 for r in results if r and r.get("error_msg"))
                     pbar.set_postfix({"Success": successful, "Failed": failed})
 
-    # 关闭进度条
+    # Close progress bar
     if show_progress:
         pbar.close()
 
-    # 记录批量调用日志
+    # Log batch call results
     total_tokens = sum(r.get("tokens_used", 0) for r in results if r)
     successful_requests = sum(1 for r in results if r and not r.get("error_msg"))
     
@@ -1027,12 +1245,12 @@ def batch_call_language_model(
                 f"Total requests: {len(requests)}, Successful: {successful_requests}, "
                 f"Total tokens used: {total_tokens}")
     
-    # 保存结果到JSONL文件（如果指定了输出文件）
+    # Save results to JSONL file (if output file is specified)
     if output_file:
         try:
             with open(output_file, 'w', encoding='utf-8') as f:
                 for result in results:
-                    if result:  # 确保结果不为None
+                    if result:  # Ensure result is not None
                         json.dump(result, f, ensure_ascii=False)
                         f.write('\n')
             logging.info(f"Results saved to {output_file}")
@@ -1068,6 +1286,11 @@ if __name__ == "__main__":
     #     # files=['1.png'] #多模态
     # )
 
+    # print(f"\nResponse: {response}")
+    # print(f"Tokens used: {tokens_used}")
+    # if error:
+    #     print(f"Error: {error}")
+
     # 处理真流式响应
     # is_first_chunk = True
     # for chunk in response:
@@ -1094,11 +1317,6 @@ if __name__ == "__main__":
     #         print(content, end='', flush=True)
     #     else:
     #         print(chunk)
-
-    # print(f"\nResponse: {response}")
-    # print(f"Tokens used: {tokens_used}")
-    # if error:
-    #     print(f"Error: {error}")
 
     # 2. 嵌入模型使用示例
     # embeddings, tokens_used, error = call_embedding_model(
