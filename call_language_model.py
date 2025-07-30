@@ -1,3 +1,12 @@
+# ！/usr/bin/python3
+# -*- coding: UTF-8 -*-
+"""
+@File    :  call_language_model.py
+@Author  :  Zhangxiao Shen
+@Date    :  2025/7/10
+@Description: Call language models and embedding models using OpenAI or Ollama APIs.
+"""
+
 import yaml
 import logging
 import time
@@ -41,6 +50,12 @@ import os
 #             print(content, end='', flush=True)
 #         else:
 #             print(chunk)
+
+# 示例自定义配置（优先于配置文件）：
+# custom_config = {
+#     'api_key': 'sk-xxx',
+#     'base_url': 'https://api.openai.com/v1'
+# }
 
 # 示例配置文件：
 # all_models:
@@ -87,37 +102,59 @@ class ModelConfig:
             logging.error(f"Failed to load config: {str(e)}")
             raise AttributeError(f"Config file in wrong format: {path}")
 
-    def get_credentials(self, model_provider: str, model_name: str) -> Dict:
+    def get_credentials(self, model_provider: str, model_name: str, skip_checking: bool = False) -> Dict:
         """获取模型凭证"""
         try:
             # 提取 all_models 列表
             all_models = self.config.get('all_models', [])
 
-            # 遍历 all_models 列表，检查 provider 和 model_name 是否合法
-            for model_info in all_models:
-                if model_info.get('provider') == model_provider:
-                    if model_name in model_info.get('model_name', []):
+            # 如果跳过检查，直接查找第一个匹配的provider并返回
+            if skip_checking:
+                for model_info in all_models:
+                    if model_info.get('provider') == model_provider:
+                        model_info = model_info.copy()  # 创建副本避免修改原配置
                         model_info['model_name'] = model_name
-                        return model_info  # 返回匹配的模型配置
+                        return model_info
+                logging.warning(f"No configuration found for provider '{model_provider}'")
+                return {}
 
-            # 如果没有找到匹配的 provider 或 model_name，记录警告并返回空字典
-            logging.warning(f"No valid configuration found for provider '{model_provider}' and model name '{model_name}'")
-            return {}
+            else:
+                # 遍历 all_models 列表，检查 provider 和 model_name 是否合法
+                for model_info in all_models:
+                    if model_info.get('provider') == model_provider:
+                        if model_name in model_info.get('model_name', []):
+                            model_info = model_info.copy()  # 创建副本避免修改原配置
+                            model_info['model_name'] = model_name
+                            return model_info  # 返回匹配的模型配置
+                # 如果没有找到匹配的 provider 或 model_name，记录警告并返回空字典
+                logging.warning(f"No valid configuration found for provider '{model_provider}' and model name '{model_name}'")
+                return {}
 
         except Exception as e:
             logging.error(f"Error in get_credentials: {str(e)}")
             return {}
             
-    def get_embedding_credentials(self, model_provider: str, model_name: str) -> Dict:
+    def get_embedding_credentials(self, model_provider: str, model_name: str, skip_checking: bool = False) -> Dict:
         """获取嵌入模型凭证"""
         try:
             # 提取 embedding_models 列表
             embedding_models = self.config.get('embedding_models', [])
 
+            # 如果跳过检查，直接查找第一个匹配的provider并返回
+            if skip_checking:
+                for model_info in embedding_models:
+                    if model_info.get('provider') == model_provider:
+                        model_info = model_info.copy()  # 创建副本避免修改原配置
+                        model_info['model_name'] = model_name
+                        return model_info
+                logging.warning(f"No embedding configuration found for provider '{model_provider}'")
+                return {}
+
             # 遍历 embedding_models 列表，检查 provider 和 model_name 是否合法
             for model_info in embedding_models:
                 if model_info.get('provider') == model_provider:
                     if model_name in model_info.get('model_name', []):
+                        model_info = model_info.copy()  # 创建副本避免修改原配置
                         model_info['model_name'] = model_name
                         return model_info  # 返回匹配的模型配置
 
@@ -655,7 +692,9 @@ def call_language_model(
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         files: Optional[List[str]] = None,
-        config_path: str = r'./llm_config.yaml'
+        skip_model_checking: bool = False,
+        config_path: Optional[str] = r'./llm_config.yaml',
+        custom_config: Optional[Dict] = None,
 ) -> (str, int, str):
     """
     调用语言模型的统一入口函数，将此函数import到代码中即可使用，请勿通过此函数调用嵌入模型
@@ -669,14 +708,33 @@ def call_language_model(
     :param temperature: 温度参数，可选
     :param max_tokens: 最大生成token数，可选
     :param files: 图片文件路径列表，可选
-    :param config_path: 配置文件路径
+    :param skip_model_checking: 是否跳过模型包含列表检查，默认为False，设为True时将直接使用提供的模型名称，不检查是否在配置文件中，但仍然进行提供商检查
+    :param config_path: 配置文件路径，与custom_config二选一
+    :param custom_config: 通过自定义配置字典而非配置文件配置模型，与config_path二选一，需包含base_url和api_key字段，当有效时将覆盖config_path
     :return: 
     一般：(response_text, tokens_used, error_msg)
     真流式输出时：(response_stream, tokens_used, error_msg)
     """
+    # 验证参数：config_path和custom_config不能同时为空
+    if config_path is None and custom_config is None:
+        error_msg = "Both config_path and custom_config cannot be None. Please provide either a config file path or custom configuration."
+        print(error_msg)
+        logging.error(error_msg)
+        return "", 0, error_msg
+
     # 初始化
-    config = ModelConfig(config_path)
-    credentials = config.get_credentials(model_provider, model_name)
+    if custom_config is not None:
+        # 使用自定义配置
+        credentials = {
+            'provider': model_provider,
+            'model_name': model_name,
+            'api_key': custom_config.get('api_key', ''),
+            'base_url': custom_config.get('base_url', '')
+        }
+    else:
+        # 使用配置文件
+        config = ModelConfig(config_path)
+        credentials = config.get_credentials(model_provider, model_name, skip_model_checking)
 
     if not credentials:
         error_msg = f"Model {model_name} not found in config"
@@ -733,7 +791,9 @@ def call_embedding_model(
         model_name: str,
         text: Union[str, List[str]],
         files: Optional[List[str]] = None,
-        config_path: str = r'./llm_config.yaml'
+        skip_model_checking: bool = False,
+        config_path: Optional[str] = r'./llm_config.yaml',
+        custom_config: Optional[Dict] = None,
 ) -> (List[List[float]], int, str):
     """
     生成嵌入向量的统一入口函数，将此函数import到代码中即可使用。不支持流式调用。
@@ -742,12 +802,31 @@ def call_embedding_model(
     :param model_name: 嵌入模型名称
     :param text: 单个文本字符串或文本列表
     :param files: 图片文件路径列表，可选
-    :param config_path: 配置文件路径
+    :param skip_model_checking: 是否跳过模型包含列表检查，默认为False，设为True时将直接使用提供的模型名称，不检查是否在配置文件中，但仍然进行提供商检查
+    :param config_path: 配置文件路径，与custom_config二选一
+    :param custom_config: 通过自定义配置字典而非配置文件配置模型，与config_path二选一，需包含base_url和api_key字段，当有效时将覆盖config_path
     :return: (embeddings, tokens_used, error_msg)
     """
+    # 验证参数：config_path和custom_config不能同时为空
+    if config_path is None and custom_config is None:
+        error_msg = "Both config_path and custom_config cannot be None. Please provide either a config file path or custom configuration."
+        print(error_msg)
+        logging.error(error_msg)
+        return [], 0, error_msg
+
     # 初始化
-    config = ModelConfig(config_path)
-    credentials = config.get_embedding_credentials(model_provider, model_name)
+    if custom_config is not None:
+        # 使用自定义配置
+        credentials = {
+            'provider': model_provider,
+            'model_name': model_name,
+            'api_key': custom_config.get('api_key', ''),
+            'base_url': custom_config.get('base_url', '')
+        }
+    else:
+        # 使用配置文件
+        config = ModelConfig(config_path)
+        credentials = config.get_embedding_credentials(model_provider, model_name, skip_model_checking)
 
     if not credentials:
         error_msg = f"Embedding model {model_name} not found in config"
@@ -789,14 +868,19 @@ if __name__ == "__main__":
     # 示例使用
     # 1. 调用语言模型示例
     response, tokens_used, error = call_language_model(
-        model_provider='aliyun',
-        model_name='qwen3-32b',
+        model_provider='openai',
+        model_name='gpt-4.1-nano',
         system_prompt="You are a helpful assistant.",
         user_prompt="Introduce GEE", #非多模态
-        enable_thinking=True,
-        stream=True,
+        enable_thinking=False, 
+        stream=False,
         # collect=False,
+        skip_model_checking=True,
         config_path="./llm_config.yaml",
+        # custom_config={
+        #     'api_key': 'sk-xxx',
+        #     'base_url': 'https://api.openai.com/v1/'
+        # }
         # user_prompt="Try to solve this problem with Python",
         # files=['1.png'] #多模态
     )
