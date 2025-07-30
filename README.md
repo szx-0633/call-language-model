@@ -134,7 +134,7 @@ response_text, tokens_used, error = call_language_model(
     model_name='qwen3-4b',
     system_prompt="You are a helpful assistant.",
     user_prompt="解决这个数学问题：2x + 5 = 15",
-    enable_thinking=True  # 启用推理过程显示
+    enable_thinking=True  # 启用推理模式
 )
 
 # 跳过模型检查（直接使用指定模型名）
@@ -306,7 +306,7 @@ response, tokens, error = call_language_model(
 - 支持嵌入模型调用，OpenAI提供商仅支持文本嵌入，Ollama支持多模态嵌入
 - 不支持多轮对话
 - Qwen3系列模型支持推理模式（`enable_thinking`参数）
-- 流式调用时无法准确统计token消耗
+- 流式调用时无法准确统计token消耗，直接返回0
 - 可通过`custom_config`参数直接配置API密钥，无需配置文件
 
 ## 日志
