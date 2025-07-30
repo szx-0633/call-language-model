@@ -132,6 +132,5 @@ Integration tests typically use:
 
 ### Getting Help
 - Review test output for specific error messages
-- Check `TEST_README.md` for detailed documentation
 - Verify configuration file format
 - Test with single API call first
