@@ -1,0 +1,27 @@
+# Test configuration file for call_language_model tests
+# This file contains mock configurations for testing purposes
+
+all_models:
+  - provider: "openai"
+    model_name: ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"]
+    api_key: "test-openai-key-123"
+    base_url: "https://api.openai.com/v1"
+  
+  - provider: "volcengine"
+    model_name: ["doubao-pro-4k", "doubao-lite-4k"]
+    api_key: "test-volcengine-key-456"
+    base_url: "https://ark.cn-beijing.volces.com/api/v3/"
+  
+  - provider: "ollama"
+    model_name: ["llama3.1:8b", "qwen3:7b", "mistral:7b"]
+    base_url: "http://localhost:11434"
+
+embedding_models:
+  - provider: "openai"
+    model_name: ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"]
+    api_key: "test-openai-embedding-key-789"
+    base_url: "https://api.openai.com/v1"
+  
+  - provider: "ollama"
+    model_name: ["nomic-embed-text", "mxbai-embed-large", "all-minilm"]
+    base_url: "http://localhost:11434"
