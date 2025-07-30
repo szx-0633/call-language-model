@@ -27,28 +27,28 @@ pip install pyyaml openai ollama
 # 语言模型配置
 all_models:
   - provider: "openai"
-    model_name: ["gpt-4o", "gpt-4o-mini"]
+    model_name: ["gpt-4o", "gpt-4o-mini", "gpt-4.1-nano"]
     api_key: "your_openai_api_key"
     base_url: "https://api.openai.com/v1"
   
   - provider: "aliyun"
-    model_name: ["qwen2.5-32b-instruct", "qwen-turbo", "qwen-max", "qwq-32b", "qwen3-7b-instruct", "qwen3-14b-instruct"]
+    model_name: ["qwen2.5-32b-instruct", "qwen-turbo", "qwen-max", "qwq-32b", "qwen3-4b", "qwen3-8b"]
     api_key: "your_aliyun_api_key"
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   
   - provider: "volcengine"
-    model_name: ["deepseek-r1-250120", "deepseek-v3-241226", "doubao-1-5-pro-256k-250115"]
+    model_name: ["deepseek-r1-250528", "deepseek-v3-250324", "doubao-1-5-pro-256k-250115"]
     api_key: "your_volcengine_api_key"
     base_url: "https://ark.cn-beijing.volces.com/api/v3/"
   
   - provider: "ollama"
-    model_name: ["llama3.1:8b", "mistral:7b", "qwen3:7b"]
+    model_name: ["llama3.1:8b", "qwen3:4b", "qwen3:8b"]
     base_url: "http://localhost:11434"
 
 # 嵌入模型配置
 embedding_models:
   - provider: "openai"
-    model_name: ["text-embedding-3-small", "text-embedding-3-large"]
+    model_name: ["text-embedding-3-small"]
     api_key: "your_openai_api_key"
     base_url: "https://api.openai.com/v1"
   
@@ -131,7 +131,7 @@ if not error and response_stream:
 # 启用推理模式（仅对Qwen3系列模型有效）
 response_text, tokens_used, error = call_language_model(
     model_provider='aliyun',
-    model_name='qwen3-7b-instruct',
+    model_name='qwen3-4b',
     system_prompt="You are a helpful assistant.",
     user_prompt="解决这个数学问题：2x + 5 = 15",
     enable_thinking=True  # 启用推理过程显示
@@ -139,8 +139,8 @@ response_text, tokens_used, error = call_language_model(
 
 # 跳过模型检查（直接使用指定模型名）
 response_text, tokens_used, error = call_language_model(
-    model_provider='zxshen',
-    model_name='openai/gpt-4.1-nano',
+    model_provider='openai',
+    model_name='gpt-4.1',
     system_prompt="You are a helpful assistant.",
     user_prompt="Hello!",
     skip_model_checking=True  # 跳过配置文件中的模型名称检查
