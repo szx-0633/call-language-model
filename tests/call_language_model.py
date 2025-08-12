@@ -1416,6 +1416,22 @@ def batch_call_language_model(
     if show_progress:
         pbar = tqdm(total=len(requests), desc="Processing requests", unit="req")
     
+    # Create file lock for thread-safe writing
+    import threading
+    file_lock = threading.Lock()
+    
+    # Initialize output file if specified (clear existing content)
+    if output_file:
+        try:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                pass  # Create/clear the file
+            logging.info(f"Initialized output file: {output_file}")
+        except Exception as e:
+            error_msg = f"Failed to initialize output file {output_file}: {str(e)}"
+            logging.error(error_msg)
+            if show_progress:
+                print(f"Warning: {error_msg}")
+    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
         future_to_index = {
@@ -1429,6 +1445,19 @@ def batch_call_language_model(
                 result = future.result()
                 results[result["request_index"]] = result
                 
+                # Real-time save to file if output_file is specified
+                if output_file and result:
+                    try:
+                        with file_lock:  # Thread-safe file writing
+                            with open(output_file, 'a', encoding='utf-8') as f:
+                                json.dump(result, f, ensure_ascii=False)
+                                f.write('\n')
+                                f.flush()  # Ensure immediate write to disk
+                    except Exception as e:
+                        error_msg = f"Failed to save result {result['request_index']} to {output_file}: {str(e)}"
+                        logging.error(error_msg)
+                        # Don't stop processing for file write errors, just log
+                
                 # Update progress bar
                 if show_progress:
                     pbar.update(1)
@@ -1441,7 +1470,7 @@ def batch_call_language_model(
                 index = future_to_index[future]
                 error_msg = f"Thread execution error for request {index}: {str(e)}"
                 logging.error(error_msg)
-                results[index] = {
+                error_result = {
                     "request_index": index,
                     "request": requests[index] if index < len(requests) else {},
                     "response_text": "",
@@ -1451,6 +1480,18 @@ def batch_call_language_model(
                     "model_name": model_name,
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
+                results[index] = error_result
+                
+                # Real-time save error result to file if output_file is specified
+                if output_file:
+                    try:
+                        with file_lock:  # Thread-safe file writing
+                            with open(output_file, 'a', encoding='utf-8') as f:
+                                json.dump(error_result, f, ensure_ascii=False)
+                                f.write('\n')
+                                f.flush()  # Ensure immediate write to disk
+                    except Exception as file_e:
+                        logging.error(f"Failed to save error result {index} to {output_file}: {str(file_e)}")
                 
                 # Update progress bar
                 if show_progress:
@@ -1471,21 +1512,8 @@ def batch_call_language_model(
                 f"Total requests: {len(requests)}, Successful: {successful_requests}, "
                 f"Total tokens used: {total_tokens}")
     
-    # Save results to JSONL file (if output file is specified)
-    if output_file:
-        try:
-            with open(output_file, 'w', encoding='utf-8') as f:
-                for result in results:
-                    if result:  # Ensure result is not None
-                        json.dump(result, f, ensure_ascii=False)
-                        f.write('\n')
-            logging.info(f"Results saved to {output_file}")
-            if show_progress:
-                print(f"Results saved to {output_file}")
-        except Exception as e:
-            error_msg = f"Failed to save results to {output_file}: {str(e)}"
-            logging.error(error_msg)
-            if show_progress:
-                print(f"Warning: {error_msg}")
+    # File saving is now done in real-time during processing
+    if output_file and show_progress:
+        print(f"Results saved to {output_file} in real-time")
     
     return results

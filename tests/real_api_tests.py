@@ -8,10 +8,11 @@ valid API credentials in the configuration file.
 
 @File    : real_api_tests.py
 @Author  : Integration Test Suite
-@Date    : 2025/7/31
+@Date    : 2025/8/13
 @Description: Integration tests with real API calls for comprehensive testing.
 """
 
+import os
 import time
 import json
 from typing import List, Dict
@@ -306,99 +307,153 @@ def test_batch_language_model_processing():
         return False
 
 def test_real_time_save():
-    """测试批量调用时的实时文件保存功能"""
+    """Test batch processing with real-time file saving functionality."""
+    print("\n" + "="*60)
+    print("TEST 7: Real-time File Saving During Batch Processing")
+    print("="*60)
     
-    # 测试请求数据
-    test_requests = [
-        {"system_prompt":"You are a helpful assistant.", "user_prompt": "简单介绍一下Python编程语言", "max_tokens": 100},
-        {"system_prompt":"You are a helpful assistant.", "user_prompt": "什么是人工智能？", "max_tokens": 100},
-        {"system_prompt":"You are a helpful assistant.", "user_prompt": "解释什么是机器学习", "max_tokens": 100},
-        {"system_prompt":"You are a helpful assistant.", "user_prompt": "深度学习的基本概念", "max_tokens": 100},
-        {"system_prompt":"You are a helpful assistant.", "user_prompt": "什么是自然语言处理？", "max_tokens": 100}
-    ]
-    
-    # 输出文件路径
-    output_file = "./test_real_time_results.jsonl"
-    
-    # 删除已存在的文件
-    if os.path.exists(output_file):
-        os.remove(output_file)
-        print(f"已删除现有文件: {output_file}")
-    
-    print("开始批量调用测试...")
-    print("观察文件是否实时更新...")
-    
-    # 监控文件的函数
-    def monitor_file():
-        """监控文件变化"""
-        line_count = 0
-        while True:
-            try:
-                if os.path.exists(output_file):
-                    with open(output_file, 'r', encoding='utf-8') as f:
-                        lines = f.readlines()
-                        if len(lines) > line_count:
-                            print(f"文件已更新: 现在有 {len(lines)} 行结果")
-                            line_count = len(lines)
-                time.sleep(1)
-            except Exception as e:
-                print(f"监控文件时出错: {e}")
-                break
-    
-    # 启动文件监控（在后台）
-    import threading
-    monitor_thread = threading.Thread(target=monitor_file, daemon=True)
-    monitor_thread.start()
-    
-    # 执行批量调用
-    results = batch_call_language_model(
-        requests=test_requests,
-        model_provider="aliyun",
-        model_name="qwen-plus",  # 使用较便宜的模型进行测试
-        max_workers=2,  # 限制并发数
-        output_file=output_file,
-        show_progress=True
-    )
-    
-    print(f"\n批量调用完成！")
-    print(f"总共处理了 {len(results)} 个请求")
-    
-    # 验证文件内容
-    if os.path.exists(output_file):
-        with open(output_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            print(f"文件中保存了 {len(lines)} 行结果")
+    try:
+        import os
+        import threading
+        
+        # Test batch requests
+        batch_requests = [
+            {
+                "system_prompt": "You are a helpful assistant. Respond concisely.",
+                "user_prompt": "What is Python programming language?",
+                "max_tokens": 100
+            },
+            {
+                "system_prompt": "You are a helpful assistant. Respond concisely.",
+                "user_prompt": "What is artificial intelligence?",
+                "max_tokens": 100
+            },
+            {
+                "system_prompt": "You are a helpful assistant. Respond concisely.",
+                "user_prompt": "Explain machine learning.",
+                "max_tokens": 100
+            },
+            {
+                "system_prompt": "You are a helpful assistant. Respond concisely.",
+                "user_prompt": "What are neural networks?",
+                "max_tokens": 100
+            },
+            {
+                "system_prompt": "You are a helpful assistant. Respond concisely.",
+                "user_prompt": "What is natural language processing?",
+                "max_tokens": 100
+            }
+        ]
+        
+        # Output file path
+        output_file = "./test_real_time_results.jsonl"
+        
+        # Remove existing file if present
+        if os.path.exists(output_file):
+            os.remove(output_file)
+            print(f"✓ Removed existing file: {output_file}")
+        
+        print(f"Processing {len(batch_requests)} requests with real-time saving...")
+        
+        # File monitoring function
+        file_update_count = 0
+        def monitor_file():
+            """Monitor file changes during processing"""
+            nonlocal file_update_count
+            line_count = 0
+            while file_update_count < len(batch_requests):
+                try:
+                    if os.path.exists(output_file):
+                        with open(output_file, 'r', encoding='utf-8') as f:
+                            lines = f.readlines()
+                            if len(lines) > line_count:
+                                file_update_count = len(lines)
+                                print(f"  📁 File updated: {len(lines)} results saved")
+                                line_count = len(lines)
+                    time.sleep(0.5)
+                except Exception as e:
+                    print(f"  ⚠️  File monitoring error: {e}")
+                    break
+        
+        # Start file monitoring in background
+        monitor_thread = threading.Thread(target=monitor_file, daemon=True)
+        monitor_thread.start()
+        
+        # Execute batch processing with real-time saving
+        results = batch_call_language_model(
+            model_provider='aliyun',
+            model_name='qwen2.5-7b-instruct',
+            requests=batch_requests,
+            max_workers=2,
+            output_file=output_file,
+            show_progress=True,
+            config_path="./llm_config.yaml"
+        )
+        
+        print(f"\n✓ Model Provider: aliyun")
+        print(f"✓ Model Name: qwen2.5-7b-instruct")
+        print(f"✓ Total Requests: {len(batch_requests)}")
+        print(f"✓ Results Received: {len(results)}")
+        print(f"✓ Output File: {output_file}")
+        
+        # Verify file content and real-time saving
+        if os.path.exists(output_file):
+            with open(output_file, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                
+            print(f"✓ File Contains: {len(lines)} lines")
             
-            # 检查每行是否都是有效的JSON
+            # Validate JSON format
             valid_json_count = 0
             for i, line in enumerate(lines):
                 try:
                     json.loads(line.strip())
                     valid_json_count += 1
                 except json.JSONDecodeError as e:
-                    print(f"第 {i+1} 行不是有效的JSON: {e}")
+                    print(f"  ⚠️  Line {i+1} invalid JSON: {e}")
             
-            print(f"其中 {valid_json_count} 行是有效的JSON格式")
+            print(f"✓ Valid JSON Lines: {valid_json_count}/{len(lines)}")
             
-            # 显示第一个结果的示例
+            # Display sample result
             if lines:
                 try:
                     first_result = json.loads(lines[0])
-                    print(f"\n第一个结果示例:")
-                    print(f"- 请求索引: {first_result.get('request_index')}")
-                    print(f"- 响应文本: {first_result.get('response_text', '')[:100]}...")
-                    print(f"- 使用的token数: {first_result.get('tokens_used')}")
-                    print(f"- 时间戳: {first_result.get('timestamp')}")
+                    print(f"\n  Sample Result:")
+                    print(f"    Request Index: {first_result.get('request_index')}")
+                    print(f"    Question: {batch_requests[0]['user_prompt']}")
+                    print(f"    Response: {first_result.get('response_text', '')[:80]}...")
+                    print(f"    Tokens Used: {first_result.get('tokens_used')}")
+                    print(f"    Timestamp: {first_result.get('timestamp')}")
                 except Exception as e:
-                    print(f"解析第一个结果时出错: {e}")
-    else:
-        print(f"输出文件 {output_file} 不存在")
+                    print(f"  ⚠️  Error parsing first result: {e}")
+            
+            # Validation assertions
+            assert len(lines) == len(batch_requests), "File should contain all batch results"
+            assert valid_json_count == len(lines), "All lines should be valid JSON"
+            assert len(results) == len(batch_requests), "Should have results for all requests"
+            
+            # Validate real-time saving occurred
+            successful_requests = sum(1 for r in results if r and not r.get('error_msg'))
+            assert successful_requests > 0, "Should have at least one successful request"
+            
+            print(f"✓ Real-time Saving: Verified")
+            print(f"✓ Successful Requests: {successful_requests}/{len(results)}")
+            
+        else:
+            raise Exception(f"Output file {output_file} was not created")
+        
+        print("✅ Test passed!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Test failed: {str(e)}")
+        return False
 
 
 def test_custom_configuration():
     """Test using custom configuration instead of config file."""
     print("\n" + "="*60)
-    print("TEST 7: Custom Configuration")
+    print("TEST 8: Custom Configuration")
     print("="*60)
     
     try:
@@ -461,7 +516,7 @@ def test_custom_configuration():
 def test_error_handling():
     """Test error handling with invalid configurations."""
     print("\n" + "="*60)
-    print("TEST 8: Error Handling")
+    print("TEST 9: Error Handling")
     print("="*60)
     
     try:
