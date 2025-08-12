@@ -7,9 +7,10 @@ and embedding models through OpenAI-compatible APIs and Ollama.
 
 @File    : call_language_model.py
 @Author  : Zhangxiao Shen
-@Date    : 2025/7/31
+@Date    : 2025/8/12
 @Description: Call language models and embedding models using OpenAI or Ollama APIs.
 """
+
 
 import base64
 import json
@@ -22,45 +23,20 @@ from typing import Dict, List, Optional, Union
 import ollama
 import yaml
 from openai import OpenAI
+from openai.types.responses import Response
 from openai.types.chat import ChatCompletion
 from tqdm import tqdm
 
+# 使用前，请将OpenAI库升级至1.88.0以上版本，低版本可能导致response接入点不可用
+
 # 配置文件格式：llm_config.yaml，需要放在检查本文件所在路径内或者指定其路径
-# 当前支持多种模型提供商，也可自行添加提供商和模型名称，但仅支持openai和ollama两种渠道调用模型
+# 当前支持多种模型提供商，也可自行添加提供商和模型名称，但仅支持openai（包含openai官方接入点和兼容接入点）和ollama两种渠道调用模型
 # 支持流式调用，设置参数collect=True会将流式调用的结果收集后返回，False会将整个流返回
-# 流式调用时不支持统计token消耗
+# 流式调用时部分模型不支持统计token消耗
 # 使用大语言模型的入口函数为call_language_model
 # 支持使用嵌入模型，需使用call_embedding_model函数调用，暂不支持多模态嵌入
 # 支持批量并行调用大语言模型，使用batch_call_language_model函数，该模式下不支持真正的流式调用
 # 批量调用支持tqdm进度条显示和结果保存到JSONL文件
-
-# 处理OpenAI真流式响应的示例代码
-#     is_first_chunk = True
-#     for chunk in response:
-#         delta = chunk.choices[0].delta
-#         if hasattr(delta, 'reasoning_content'):
-#             if delta.reasoning_content is not None:
-#                 if is_first_chunk:
-#                     print("\n<think>\n")
-#                     is_first_chunk = False
-#                 print(delta.reasoning_content, end='', flush=True)
-#             else:
-#                 if not is_first_chunk:
-#                     print("\n</think>\n")
-#                     is_first_chunk = True
-#                 print(delta.content, end='', flush=True)
-#         elif hasattr(delta, 'content'):
-#             print(delta.content, end='', flush=True)
-#         else:
-#             print(delta)
-
-# 处理Ollama真流式响应的示例代码
-#     for chunk in response:
-#         if hasattr(chunk, 'message') and chunk.message and hasattr(chunk.message, 'content'):
-#             content = chunk.message.content
-#             print(content, end='', flush=True)
-#         else:
-#             print(chunk)
 
 # 示例自定义配置（优先于配置文件）：
 # custom_config = {
@@ -246,7 +222,6 @@ class BaseModel:
             user_prompt: str,
             temperature: Optional[float] = None,
             max_tokens: Optional[int] = None,
-            enable_thinking: Optional[bool] = None,
             files: Optional[List[str]] = None
     ) -> tuple[str, int, str]:
         """Generate text response from the model.
@@ -256,7 +231,6 @@ class BaseModel:
             user_prompt: User input text.
             temperature: Sampling temperature (0.0 to 2.0).
             max_tokens: Maximum tokens in response.
-            enable_thinking: Whether to enable reasoning mode.
             files: List of file paths for multimodal input.
             
         Returns:
@@ -269,10 +243,11 @@ class BaseModel:
 
 
 class OpenAIModel(BaseModel):
-    """OpenAI-compatible model handler.
+    """OpenAI model (or other models that supports /responses endpoint) handler.
+    THIS IS ONLY for OpenAI /responses endpoint. Specify model_provider="openai" for this method.
+    NOTE: Most third-party provider do NOT support this endpoint.
     
-    Handles text and multimodal interactions with OpenAI-compatible APIs
-    including OpenAI, Alibaba Cloud, Volcengine, and other compatible providers.
+    Handles text and multimodal interactions with OpenAI APIs.
     """
 
     def __init__(self, credentials: Dict) -> None:
@@ -327,8 +302,8 @@ class OpenAIModel(BaseModel):
             messages.append({"role": "user", "content": kwargs['user_prompt']})
         return messages
 
-    def _prepare_params(self, messages, **kwargs) -> dict:
-        """Prepare API parameters for OpenAI API calls.
+    def _prepare_params_for_responses_endpoint(self, messages, **kwargs) -> dict:
+        """Prepare API parameters for OpenAI API calls. This is for the /responses endpoint.
         
         Handles model-specific configurations and filters out None values.
         
@@ -339,18 +314,21 @@ class OpenAIModel(BaseModel):
         Returns:
             Dictionary of API parameters with None values filtered out.
         """
-        if "qwen3" in str(self.credentials.get('model_name')):
-            enable_thinking = kwargs.get('enable_thinking', True)
-            extra_body = {"enable_thinking": enable_thinking}
-        else:
-            extra_body = None
+        keys_to_remove = ["model_provider", "model_name", "system_prompt", "user_prompt", "stream", "max_tokens",
+                          "skip_model_checking", "config_path", "custom_config"]
         params = {
-            "model": self.credentials.get('model_name', 'gpt-4o'),
-            "messages": messages,
-            "temperature": kwargs.get('temperature'),
-            "max_tokens": kwargs.get('max_tokens'),
-            "extra_body": extra_body
+            "model": self.credentials.get('model_name', 'gpt-5'),
+            "input": messages,
+            "max_output_tokens": kwargs.get("max_tokens", None),
+            **kwargs
         }
+        # remove keys in keys_to_remove
+        for key in keys_to_remove:
+            try:
+                del params[key]
+            except:
+                pass
+        # only return params not None
         return {k: v for k, v in params.items() if v is not None}
 
     def generate(self, **kwargs) -> tuple[str, int, str]:
@@ -363,7 +341,262 @@ class OpenAIModel(BaseModel):
             Tuple containing (response_text, status_code, error_message).
         """
         messages = self._prepare_messages(**kwargs)
-        params = self._prepare_params(messages, **kwargs)
+        params = self._prepare_params_for_responses_endpoint(messages, **kwargs)
+        # Remove collect
+        if 'collect' in params:
+            del params['collect']
+
+        max_retries = 3
+        retry_delay = 10
+        for attempt in range(max_retries):
+            try:
+                response = self.client.responses.create(**params)
+                return self._parse_response(response)
+            except Exception as e:
+                str_e = str(e).lower()
+                if "timeout" in str_e or "connection error" in str_e:
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Network error: {str(e)}, retrying in {retry_delay}s...")
+                        print(f"Network error: {str(e)}, retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                    else:
+                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
+                        print(f"API request failed after {max_retries} attempts: {str(e)}")
+                        logging.error(error_msg)
+                        return "", 0, error_msg
+                elif "NoneType" in str_e:
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Error: Did not receive response object, retrying in {retry_delay}s...")
+                        print(f"Network error: {str(e)}, retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                    else:
+                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
+                        print(f"API request failed after {max_retries} attempts: {str(e)}")
+                        logging.error(error_msg)
+                        return "", 0, error_msg
+                else:
+                    error_msg = f"OpenAI API error: {str(e)}"
+                    print(f"OpenAI API error: {str(e)}")
+                    logging.error(error_msg)
+                    return "", 0, error_msg
+
+    def generate_stream(self, **kwargs) -> tuple[str, int, str]:
+        """Generate streaming response.
+        
+        Supports both collected (returns final result) and streaming modes.
+        When collect=True, returns format same as non-streaming, otherwise returns stream object.
+        
+        Args:
+            **kwargs: Keyword arguments including system_prompt, user_prompt, collect, etc.
+            
+        Returns:
+            Tuple containing (response_text, status_code, error_message).
+        """
+        messages = self._prepare_messages(**kwargs)
+        params = self._prepare_params_for_responses_endpoint(messages, **kwargs)
+        params["stream"] = True
+
+        complete_response = ""
+        reasoning_content = ""
+        estimated_tokens = 0
+
+        max_retries = 3
+        retry_delay = 10
+
+        collect_stream_answer = kwargs.get('collect', True)
+
+        # Remove collect
+        if 'collect' in params:
+            del params['collect']
+
+        for attempt in range(max_retries):
+            try:
+                stream = self.client.responses.create(**params)
+
+                if not collect_stream_answer:
+                    # return the whole stream if not collecting
+                    return stream, 0, None
+                else:
+                    for chunk in stream:
+                        last_chunk = chunk
+                        if chunk.type == 'response.reasoning_summary_text.delta':
+                            if chunk.delta:
+                                reasoning_content += chunk.delta
+                        elif chunk.type == 'response.output_text.delta':
+                            if chunk.delta:
+                                complete_response += chunk.delta
+                        else:
+                            # print(chunk)
+                            continue
+                    
+                    tokens = 0
+                    if hasattr(last_chunk, 'response'):
+                        if hasattr(last_chunk.response, 'usage'):
+                            if hasattr(last_chunk.response.usage, 'total_tokens'):
+                                tokens = last_chunk.response.usage.total_tokens
+
+                    # Add reasoning content into response
+                    if reasoning_content:
+                        complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
+
+                    return complete_response, tokens, None
+
+            except Exception as e:
+                str_e = str(e).lower()
+                if "timeout" in str_e or "connection error" in str_e:
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Network error: {str(e)}, retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                    else:
+                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
+                        logging.error(error_msg)
+                        return complete_response, int(estimated_tokens), error_msg
+                else:
+                    error_msg = f"OpenAI API error: {str(e)}"
+                    logging.error(error_msg)
+                    print(error_msg)
+                    return complete_response, int(estimated_tokens), error_msg
+
+    def _parse_response(self, response: Response) -> tuple[str, int, str]:
+        """Parse OpenAI API response.
+        
+        Args:
+            response: Response response object from OpenAI API.
+            
+        Returns:
+            Tuple containing (response_text, token_count, error_message).
+        """
+        if len(response.output) > 1:
+            # reasoning models
+            complete_response = response.output[1].content[0].text
+        else:
+            # non-reasoning models
+            complete_response = response.output[0].content[0].text
+        
+        reasoning_content = None
+        
+        # Get reasoning content for OpenAI
+        if hasattr(response, 'output'):
+            if hasattr(response.output[0], "summary"):
+                for item in response.output[0].summary:
+                    if hasattr(item, 'summary') and item.summary:
+                        reasoning_content += "\n".join([s.text for s in item if hasattr(s, 'text')])
+        
+        # Add reasoning content to complete response
+        if reasoning_content:
+            complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
+        
+        return (
+            complete_response,
+            response.usage.total_tokens if response.usage else 0,
+            None
+        )
+
+
+class OpenAICompatibleModel(BaseModel):
+    """OpenAI-compatible model handler.
+    This uses OpenAI /chat/completions endpoint. Specify model_provider!="openai" for this method.
+    NOTE: Most third-party provider ONLY support this endpoint.
+    You CANNOT get reasoning content for OpenAI Models from this endpoint.
+    
+    Handles text and multimodal interactions with OpenAI-compatible APIs
+    including Alibaba Cloud, Volcengine, and other compatible providers.
+    """
+
+    def __init__(self, credentials: Dict) -> None:
+        """Initialize OpenAI model with credentials.
+        
+        Args:
+            credentials: Dictionary containing API credentials and configuration.
+        """
+        super().__init__(credentials)
+        self.client = OpenAI(
+            api_key=credentials.get('api_key', ''),
+            base_url=credentials.get('base_url', 'https://api.openai.com/v1')
+        )
+
+    def _encode_image(self, image_path: str) -> str:
+        """Encode image to base64 string in OpenAI API format.
+        
+        Args:
+            image_path: Path to the image file.
+            
+        Returns:
+            Base64 encoded string with data URL format for OpenAI API.
+        """
+        with open(image_path, "rb") as img_file:
+            base64_str = base64.b64encode(img_file.read()).decode('utf-8')
+            img_format = img_file.name.split('.')[-1]
+            result_str = f"data:image/{img_format};base64,{base64_str}"
+            return result_str
+
+    def _prepare_messages(self, **kwargs) -> list:
+        """Prepare message format for OpenAI API calls.
+        
+        Handles both text-only and multimodal (text + images) requests.
+        
+        Args:
+            **kwargs: Keyword arguments containing system_prompt, user_prompt, and optional files.
+            
+        Returns:
+            List of message dictionaries formatted for OpenAI API.
+        """
+        messages = [{"role": "system", "content": kwargs['system_prompt']}]
+        if kwargs.get('files'):
+            # Handle multimodal requests
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": kwargs['user_prompt']},
+                    *[{"type": "image_url", "image_url": {"url": f"{self._encode_image(f)}"}} for f in kwargs['files']]
+                ]
+            })
+        else:
+            messages.append({"role": "user", "content": kwargs['user_prompt']})
+        return messages
+
+    def _prepare_params_for_completions_endpoint(self, messages, **kwargs) -> dict:
+        """Prepare API parameters for OpenAI API calls. This is for the /chat/completions endpoint.
+        
+        Handles model-specific configurations and filters out None values.
+        
+        Args:
+            messages: List of message dictionaries.
+            **kwargs: Additional parameters like temperature, max_tokens, etc.
+            
+        Returns:
+            Dictionary of API parameters with None values filtered out.
+        """
+        keys_to_remove = ["model_provider", "model_name", "system_prompt", "user_prompt", "stream", 
+                          "skip_model_checking", "config_path", "custom_config"]
+        params = {
+            "model": self.credentials.get('model_name', 'gpt-5'),
+            "messages": messages,
+            **kwargs
+        }
+        # remove keys in keys_to_remove
+        for key in keys_to_remove:
+            try:
+                del params[key]
+            except:
+                pass
+        # only return params not None
+        return {k: v for k, v in params.items() if v is not None}
+
+    def generate(self, **kwargs) -> tuple[str, int, str]:
+        """Generate non-streaming response.
+        
+        Args:
+            **kwargs: Keyword arguments including system_prompt, user_prompt, etc.
+            
+        Returns:
+            Tuple containing (response_text, status_code, error_message).
+        """
+        messages = self._prepare_messages(**kwargs)
+        params = self._prepare_params_for_completions_endpoint(messages, **kwargs)
+        # Remove collect
+        if 'collect' in params:
+            del params['collect']
 
         max_retries = 3
         retry_delay = 10
@@ -412,7 +645,7 @@ class OpenAIModel(BaseModel):
             Tuple containing (response_text, status_code, error_message).
         """
         messages = self._prepare_messages(**kwargs)
-        params = self._prepare_params(messages, **kwargs)
+        params = self._prepare_params_for_completions_endpoint(messages, **kwargs)
         params["stream"] = True
 
         complete_response = ""
@@ -424,35 +657,42 @@ class OpenAIModel(BaseModel):
 
         collect_stream_answer = kwargs.get('collect', True)
 
-        # 删除collect参数，避免OpenAI API报错
-        if 'collect' in kwargs:
-            del kwargs['collect']
+        # Remove collect
+        if 'collect' in params:
+            del params['collect']
 
         for attempt in range(max_retries):
             try:
                 stream = self.client.chat.completions.create(**params)
 
                 if not collect_stream_answer:
-                    # 如果不收集流式结果，直接返回stream对象
+                    # Directly return the stream if collect==False
                     return stream, 0, None
                 else:
+                    returned_tokens = None
                     for chunk in stream:
+                        # print(chunk)
                         if chunk.choices and len(chunk.choices) > 0:
                             delta = chunk.choices[0].delta
 
-                            # 处理文本内容
+                            # Parse content
                             if hasattr(delta, 'content') and delta.content is not None:
                                 content = delta.content
                                 complete_response += content
 
-                            # 处理reasoning_content（如果有）
+                            # Parse reasoning_content
                             if hasattr(delta, 'reasoning_content') and delta.reasoning_content is not None:
                                 reasoning_content += delta.reasoning_content
+                        
+                        if hasattr(chunk, 'usage') and hasattr(chunk.usage, 'total_tokens'):
+                            returned_tokens = chunk.usage.total_tokens
 
-                    # 注意流式调用不支持token消耗统计
-                    tokens = 0
+                    if returned_tokens:
+                        tokens = returned_tokens
+                    else:
+                        tokens = 0
 
-                    # 流结束后，如果有reasoning_content，将其添加到完整响应中
+                    # Add reasoning_content into response
                     if reasoning_content:
                         complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
 
@@ -471,6 +711,7 @@ class OpenAIModel(BaseModel):
                 else:
                     error_msg = f"OpenAI API error: {str(e)}"
                     logging.error(error_msg)
+                    print(error_msg)
                     return complete_response, int(estimated_tokens), error_msg
 
     def _parse_response(self, response: ChatCompletion) -> tuple[str, int, str]:
@@ -523,12 +764,6 @@ class OllamaModel(BaseModel):
         # Construct messages
         messages = [{"role": "system", "content": kwargs.get('system_prompt')}]
         user_prompt_content = kwargs.get('user_prompt')
-        if "qwen3" in str(self.credentials.get('model_name')):
-            enable_thinking = kwargs.get('enable_thinking', True)
-            if not enable_thinking:
-                user_prompt_content += " /no_think"
-        else:
-            enable_thinking = None
 
         if kwargs.get('files'):
             image_encoded = [self._encode_image(f) for f in kwargs['files']]
@@ -555,7 +790,7 @@ class OllamaModel(BaseModel):
                 messages=messages,
                 options=options,
             )
-            return self._parse_response(response, enable_thinking)
+            return self._parse_response(response)
         except Exception as e:
             logging.error(f"Ollama API error: {str(e)}")
             print(f"Ollama API error: {str(e)}")
@@ -575,12 +810,6 @@ class OllamaModel(BaseModel):
         """
         # Construct messages
         messages = [{"role": "system", "content": kwargs.get('system_prompt')}]
-        if "qwen3" in str(self.credentials.get('model_name')):
-            enable_thinking = kwargs.get('enable_thinking', True)
-            if not enable_thinking:
-                user_prompt_content += " /no_think"
-        else:
-            enable_thinking = None
 
         if kwargs.get('files'):
             image_encoded = [self._encode_image(f) for f in kwargs['files']]
@@ -636,9 +865,6 @@ class OllamaModel(BaseModel):
                     tokens = 0
                     if hasattr(stream, 'eval_count') and hasattr(stream, 'prompt_eval_count'):
                         tokens = stream.eval_count + stream.prompt_eval_count
-                    
-                    if not enable_thinking:
-                        complete_response = complete_response.replace("<think>\n", "").replace("\n</think>\n\n", "")
 
                     return complete_response, tokens, None
 
@@ -660,11 +886,9 @@ class OllamaModel(BaseModel):
                     logging.error(error_msg)
                     return complete_response, int(estimated_tokens), error_msg
 
-    def _parse_response(self, response, enable_thinking) -> tuple[str, int, str]:
+    def _parse_response(self, response) -> tuple[str, int, str]:
         tokens_used = response.eval_count + response.prompt_eval_count
         complete_response = response.message.content
-        if not enable_thinking:
-            complete_response = complete_response.replace("<think>\n", "").replace("\n</think>\n\n", "")
         return (
             complete_response,
             tokens_used,
@@ -893,27 +1117,26 @@ def call_language_model(
         user_prompt: str,
         stream: bool = False,
         collect: bool = True,
-        enable_thinking: Optional[bool] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         files: Optional[List[str]] = None,
         skip_model_checking: bool = False,
         config_path: Optional[str] = r'./llm_config.yaml',
         custom_config: Optional[Dict] = None,
+        **kwargs
 ) -> tuple[str, int, str]:
     """Unified entry function for calling language models.
     
     Import this function into your code to use. Do not use this function to call embedding models.
     
     Args:
-        model_provider: Model provider like "openai", "aliyun", "volcengine", "ollama".
+        model_provider: Model provider like "openai", "aliyun", "volcengine", "ollama". OpenAI uses /reponses endpoint, and other OpenAI Compatible ones use /chat/completions endpoint.
         model_name: Model name, note that some providers may include version numbers.
         system_prompt: System instruction.
         user_prompt: User input text.
         stream: Whether to use streaming mode, optional.
         collect: Whether to collect streaming results (only effective when stream=True).
                 Default True for collected results, False for true streaming requiring manual collection.
-        enable_thinking: Whether to enable reasoning mode (only effective for Qwen3 series, default True).
         temperature: Sampling temperature, optional.
         max_tokens: Maximum tokens to generate, optional.
         files: List of image file paths, optional.
@@ -922,6 +1145,7 @@ def call_language_model(
         config_path: Configuration file path, mutually exclusive with custom_config.
         custom_config: Custom configuration dict instead of file, mutually exclusive with config_path.
                       Must contain base_url and api_key fields. Overrides config_path when valid.
+        **kwargs: Any additional parameters will be passed directly to the underlying API call. For example, enable_thinking, thinking_effort, completion_tokens...
         
     Returns:
         Tuple containing (response_text, tokens_used, error_message).
@@ -954,10 +1178,12 @@ def call_language_model(
         logging.error(error_msg)
         return "", 0, error_msg
 
-    if model_provider == "ollama":
+    if model_provider.lower() == "ollama":
         model_class = OllamaModel
-    else:
+    elif model_provider.lower() == "openai":
         model_class = OpenAIModel
+    else:
+        model_class = OpenAICompatibleModel
 
     if not model_class:
         error_msg = f"Unsupported model provider: {model_provider}"
@@ -974,9 +1200,9 @@ def call_language_model(
                 user_prompt=user_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                enable_thinking=enable_thinking,
                 collect=collect,
-                files=files
+                files=files,
+                **kwargs
             )
         else:
             result = model.generate(
@@ -984,8 +1210,8 @@ def call_language_model(
                 user_prompt=user_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                enable_thinking=enable_thinking,
-                files=files
+                files=files,
+                **kwargs
             )
         # Log successful API call
         _, tokens, _ = result
@@ -1086,7 +1312,6 @@ def batch_call_language_model(
         requests: List[Dict],
         max_workers: int = 5,
         stream: bool = False,
-        enable_thinking: Optional[bool] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         skip_model_checking: bool = False,
@@ -1094,19 +1319,19 @@ def batch_call_language_model(
         custom_config: Optional[Dict] = None,
         output_file: Optional[str] = None,
         show_progress: bool = True,
+        **kwargs
 ) -> List[Dict]:
     """Batch parallel calling language model unified entry function.
     
     This mode does not support true streaming calls.
     
     Args:
-        model_provider: Model provider like "openai", "aliyun", "volcengine", "ollama".
+        model_provider: Model provider like "openai", "aliyun", "volcengine", "ollama". OpenAI uses /reponses endpoint, and other OpenAI Compatible ones use /chat/completions endpoint.
         model_name: Model name, note that some providers may include version numbers.
         requests: List of request dictionaries containing system_prompt, user_prompt and optional files field.
                  Format: [{"system_prompt": "...", "user_prompt": "...", "files": [...]}, ...]
         max_workers: Maximum number of parallel worker threads (default 5).
         stream: Whether to use streaming mode (default False). When True, collects and returns streaming responses.
-        enable_thinking: Whether to enable reasoning mode (only effective for Qwen3 series, default True).
         temperature: Sampling temperature, optional.
         max_tokens: Maximum tokens to generate, optional.
         skip_model_checking: Whether to skip model name validation (default False).
@@ -1114,6 +1339,7 @@ def batch_call_language_model(
         custom_config: Custom configuration dict instead of file, mutually exclusive with config_path.
         output_file: Output JSONL file path, optional. If provided, saves all results to specified file.
         show_progress: Whether to show progress bar (default True).
+        **kwargs: Any additional parameters will be passed directly to the underlying API call. For example, enable_thinking, thinking_effort, completion_tokens...
         
     Returns:
         List of result dictionaries containing request_index, response_text, tokens_used, error_msg fields.
@@ -1132,7 +1358,7 @@ def batch_call_language_model(
             return [{"request_index": i, "response_text": "", "tokens_used": 0, "error_msg": error_msg} for i in range(len(requests))]
         
         if 'system_prompt' not in req or 'user_prompt' not in req:
-            error_msg = f"Request {i} missing required fields: system_prompt and user_prompt"
+            error_msg = f"Request {i} missing required fields: system_prompt or user_prompt"
             logging.error(error_msg)
             return [{"request_index": i, "response_text": "", "tokens_used": 0, "error_msg": error_msg} for i in range(len(requests))]
 
@@ -1147,13 +1373,13 @@ def batch_call_language_model(
                 user_prompt=request['user_prompt'],
                 stream=stream,
                 collect=True,
-                enable_thinking=enable_thinking,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 files=request.get('files', None),
                 skip_model_checking=skip_model_checking,
                 config_path=config_path,
                 custom_config=custom_config,
+                **kwargs
             )
             
             result = {
