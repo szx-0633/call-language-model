@@ -305,6 +305,95 @@ def test_batch_language_model_processing():
         print(f"❌ Test failed: {str(e)}")
         return False
 
+def test_real_time_save():
+    """测试批量调用时的实时文件保存功能"""
+    
+    # 测试请求数据
+    test_requests = [
+        {"system_prompt":"You are a helpful assistant.", "user_prompt": "简单介绍一下Python编程语言", "max_tokens": 100},
+        {"system_prompt":"You are a helpful assistant.", "user_prompt": "什么是人工智能？", "max_tokens": 100},
+        {"system_prompt":"You are a helpful assistant.", "user_prompt": "解释什么是机器学习", "max_tokens": 100},
+        {"system_prompt":"You are a helpful assistant.", "user_prompt": "深度学习的基本概念", "max_tokens": 100},
+        {"system_prompt":"You are a helpful assistant.", "user_prompt": "什么是自然语言处理？", "max_tokens": 100}
+    ]
+    
+    # 输出文件路径
+    output_file = "./test_real_time_results.jsonl"
+    
+    # 删除已存在的文件
+    if os.path.exists(output_file):
+        os.remove(output_file)
+        print(f"已删除现有文件: {output_file}")
+    
+    print("开始批量调用测试...")
+    print("观察文件是否实时更新...")
+    
+    # 监控文件的函数
+    def monitor_file():
+        """监控文件变化"""
+        line_count = 0
+        while True:
+            try:
+                if os.path.exists(output_file):
+                    with open(output_file, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                        if len(lines) > line_count:
+                            print(f"文件已更新: 现在有 {len(lines)} 行结果")
+                            line_count = len(lines)
+                time.sleep(1)
+            except Exception as e:
+                print(f"监控文件时出错: {e}")
+                break
+    
+    # 启动文件监控（在后台）
+    import threading
+    monitor_thread = threading.Thread(target=monitor_file, daemon=True)
+    monitor_thread.start()
+    
+    # 执行批量调用
+    results = batch_call_language_model(
+        requests=test_requests,
+        model_provider="aliyun",
+        model_name="qwen-plus",  # 使用较便宜的模型进行测试
+        max_workers=2,  # 限制并发数
+        output_file=output_file,
+        show_progress=True
+    )
+    
+    print(f"\n批量调用完成！")
+    print(f"总共处理了 {len(results)} 个请求")
+    
+    # 验证文件内容
+    if os.path.exists(output_file):
+        with open(output_file, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            print(f"文件中保存了 {len(lines)} 行结果")
+            
+            # 检查每行是否都是有效的JSON
+            valid_json_count = 0
+            for i, line in enumerate(lines):
+                try:
+                    json.loads(line.strip())
+                    valid_json_count += 1
+                except json.JSONDecodeError as e:
+                    print(f"第 {i+1} 行不是有效的JSON: {e}")
+            
+            print(f"其中 {valid_json_count} 行是有效的JSON格式")
+            
+            # 显示第一个结果的示例
+            if lines:
+                try:
+                    first_result = json.loads(lines[0])
+                    print(f"\n第一个结果示例:")
+                    print(f"- 请求索引: {first_result.get('request_index')}")
+                    print(f"- 响应文本: {first_result.get('response_text', '')[:100]}...")
+                    print(f"- 使用的token数: {first_result.get('tokens_used')}")
+                    print(f"- 时间戳: {first_result.get('timestamp')}")
+                except Exception as e:
+                    print(f"解析第一个结果时出错: {e}")
+    else:
+        print(f"输出文件 {output_file} 不存在")
+
 
 def test_custom_configuration():
     """Test using custom configuration instead of config file."""
@@ -425,6 +514,7 @@ def run_all_tests():
         ("Embedding Model Call", test_embedding_model_call),
         ("Multiple Text Embeddings", test_multiple_text_embeddings),
         ("Batch Language Model Processing", test_batch_language_model_processing),
+        ("Batch Result Real-Time Saving", test_real_time_save),
         ("Custom Configuration", test_custom_configuration),
         ("Error Handling", test_error_handling),
     ]
