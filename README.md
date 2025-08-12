@@ -89,7 +89,7 @@ response_text, tokens_used, error = call_language_model(
     user_prompt="Give a matrix multiplication algorithm as fast as possible. Think hard about this.",
     reasoning={ # 推理配置
         "effort": "high",  # 推理强度：low, medium, high
-        "summary": "auto",
+        "summary": "auto", # 推理内容总结，注意OpenAI不支持完整推理内容返回
     },
     max_output_tokens=32768
 )
@@ -336,7 +336,6 @@ batch_results = batch_call_language_model(
 - `skip_model_checking`: 是否跳过模型名称检查，设为True时可使用任意模型名（默认 False）
 - `config_path`: 配置文件路径（默认 "./llm_config.yaml"）
 - `custom_config`: 自定义配置字典，包含api_key和base_url，优先于config_path（可选）
-- `thinking_effort`: 推理强度，仅对OpenAI推理模型有效，可选值："low", "medium", "high"（可选）
 - `max_completion_tokens`: 最大完成tokens数，用于控制回复长度（可选）
 - `**kwargs`: 其他任意API参数，会直接传递给底层API调用
 - `files`: 图片文件路径列表，用于多模态输入（可选）
@@ -369,7 +368,7 @@ batch_results = batch_call_language_model(
 - `custom_config`: 自定义配置字典，包含api_key和base_url，优先于config_path（可选）
 - `output_file`: 输出JSONL文件路径（可选）。如果提供，将保存所有结果到指定文件
 - `show_progress`: 是否显示进度条（默认 True）
-- `**kwargs`: 其他任意API参数，会直接传递给底层API调用（如thinking_effort、max_completion_tokens等）
+- `**kwargs`: 其他任意API参数，会直接传递给底层API调用
 
 ## 返回值说明
 
