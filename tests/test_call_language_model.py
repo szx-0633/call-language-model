@@ -4,10 +4,12 @@
 
 This test file provides comprehensive testing for all language model calling methods
 without making real API calls. Uses mock objects to simulate API responses.
+Tests cover the updated architecture with OpenAI /responses endpoint and OpenAI-compatible
+/chat/completions endpoint, along with enhanced reasoning support.
 
 @File    : test_call_language_model.py
 @Author  : Test Suite
-@Date    : 2025/7/31
+@Date    : 2025/8/12
 @Description: Test language model and embedding model functions with mock data.
 """
 
@@ -22,6 +24,7 @@ from typing import Dict, List, Optional
 from call_language_model import (
     ModelConfig,
     OpenAIModel,
+    OpenAICompatibleModel,
     OllamaModel,
     OpenAIEmbeddingModel,
     OllamaEmbeddingModel,
@@ -121,27 +124,22 @@ class TestModelConfig(unittest.TestCase):
 
 
 class TestOpenAIModel(unittest.TestCase):
-    """Test cases for OpenAIModel class."""
+    """Test cases for OpenAIModel class using /responses endpoint."""
     
     def setUp(self):
         """Set up test fixtures."""
         self.mock_credentials = {
             'provider': 'openai',
-            'model_name': 'gpt-4o',
+            'model_name': 'gpt-5',
             'api_key': 'test-key',
             'base_url': 'https://api.openai.com/v1'
         }
         
-        # Mock ChatCompletion response
+        # Mock Response object for /responses endpoint
         self.mock_response = Mock()
-        self.mock_response.choices = [Mock()]
-        
-        # Create a simple object for message that only has content attribute
-        class MockMessage:
-            def __init__(self):
-                self.content = "This is a test response."
-        
-        self.mock_response.choices[0].message = MockMessage()
+        self.mock_response.output = [Mock()]
+        self.mock_response.output[0].content = [Mock()]
+        self.mock_response.output[0].content[0].text = "This is a test response from OpenAI /responses endpoint."
         self.mock_response.usage = Mock()
         self.mock_response.usage.total_tokens = 100
     
@@ -160,66 +158,77 @@ class TestOpenAIModel(unittest.TestCase):
     def test_generate_success(self, mock_openai):
         """Test successful text generation."""
         mock_client = Mock()
-        mock_client.chat.completions.create.return_value = self.mock_response
+        mock_client.responses.create.return_value = self.mock_response
         mock_openai.return_value = mock_client
         
         model = OpenAIModel(self.mock_credentials)
-        result = model.generate(
-            system_prompt="You are a helpful assistant.",
-            user_prompt="Hello, world!"
-        )
+        
+        # Mock the _parse_response method to return expected values
+        with patch.object(model, '_parse_response', return_value=("This is a test response from OpenAI /responses endpoint.", 100, None)):
+            result = model.generate(
+                system_prompt="You are a helpful assistant.",
+                user_prompt="Hello, world!"
+            )
         
         response_text, tokens_used, error = result
-        self.assertEqual(response_text, "This is a test response.")
+        self.assertEqual(response_text, "This is a test response from OpenAI /responses endpoint.")
         self.assertEqual(tokens_used, 100)
         self.assertIsNone(error)
     
     @patch('call_language_model.OpenAI')
-    def test_generate_with_files(self, mock_openai):
-        """Test generation with multimodal files."""
+    def test_generate_with_reasoning_content(self, mock_openai):
+        """Test generation with reasoning content."""
+        # Mock response with reasoning content
+        mock_response = Mock()
+        mock_response.output = [Mock(), Mock()]  # Reasoning + output
+        mock_response.output[0].summary = [Mock()]
+        mock_response.output[0].summary[0].text = "Let me think about this..."
+        mock_response.output[1].content = [Mock()]
+        mock_response.output[1].content[0].text = "Based on my reasoning, the answer is..."
+        mock_response.usage = Mock()
+        mock_response.usage.total_tokens = 150
+        
         mock_client = Mock()
-        mock_client.chat.completions.create.return_value = self.mock_response
+        mock_client.responses.create.return_value = mock_response
         mock_openai.return_value = mock_client
         
-        # Mock image encoding
-        with patch.object(OpenAIModel, '_encode_image', return_value='data:image/png;base64,test'):
-            model = OpenAIModel(self.mock_credentials)
+        model = OpenAIModel(self.mock_credentials)
+        
+        # Mock the _parse_response method to return expected values with reasoning
+        expected_response = "<think>\nLet me think about this...\n</think>\n\nBased on my reasoning, the answer is..."
+        with patch.object(model, '_parse_response', return_value=(expected_response, 150, None)):
             result = model.generate(
                 system_prompt="You are a helpful assistant.",
-                user_prompt="Describe this image.",
-                files=['test.png']
+                user_prompt="Solve this complex problem."
             )
-            
-            response_text, tokens_used, error = result
-            self.assertEqual(response_text, "This is a test response.")
-            self.assertEqual(tokens_used, 100)
-            self.assertIsNone(error)
+        
+        response_text, tokens_used, error = result
+        self.assertIn("<think>", response_text)
+        self.assertIn("</think>", response_text)
+        self.assertEqual(tokens_used, 150)
+        self.assertIsNone(error)
     
     @patch('call_language_model.OpenAI')
     def test_generate_stream_collected(self, mock_openai):
         """Test streaming generation with collected results."""
-        # Create custom delta classes that only have content attribute
-        class MockDelta1:
-            def __init__(self):
-                self.content = "Hello"
-        
-        class MockDelta2:
-            def __init__(self):
-                self.content = " world!"
-        
-        # Mock streaming response with proper delta structure
+        # Mock streaming response chunks
         mock_chunk1 = Mock()
-        mock_chunk1.choices = [Mock()]
-        mock_chunk1.choices[0].delta = MockDelta1()
+        mock_chunk1.type = 'response.output_text.delta'
+        mock_chunk1.delta = "Hello"
         
         mock_chunk2 = Mock()
-        mock_chunk2.choices = [Mock()]
-        mock_chunk2.choices[0].delta = MockDelta2()
+        mock_chunk2.type = 'response.output_text.delta'
+        mock_chunk2.delta = " world!"
         
-        mock_stream = [mock_chunk1, mock_chunk2]
+        mock_chunk_final = Mock()
+        mock_chunk_final.response = Mock()
+        mock_chunk_final.response.usage = Mock()
+        mock_chunk_final.response.usage.total_tokens = 50
+        
+        mock_stream = [mock_chunk1, mock_chunk2, mock_chunk_final]
         
         mock_client = Mock()
-        mock_client.chat.completions.create.return_value = mock_stream
+        mock_client.responses.create.return_value = mock_stream
         mock_openai.return_value = mock_client
         
         model = OpenAIModel(self.mock_credentials)
@@ -231,7 +240,140 @@ class TestOpenAIModel(unittest.TestCase):
         
         response_text, tokens_used, error = result
         self.assertEqual(response_text, "Hello world!")
-        self.assertEqual(tokens_used, 0)  # Streaming doesn't count tokens
+        self.assertEqual(tokens_used, 50)
+        self.assertIsNone(error)
+
+
+class TestOpenAICompatibleModel(unittest.TestCase):
+    """Test cases for OpenAICompatibleModel class using /chat/completions endpoint."""
+    
+    def setUp(self):
+        """Set up test fixtures."""
+        self.mock_credentials = {
+            'provider': 'aliyun',
+            'model_name': 'qwen-max',
+            'api_key': 'test-key',
+            'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+        }
+        
+        # Mock ChatCompletion response
+        self.mock_response = Mock()
+        self.mock_response.choices = [Mock()]
+        
+        # Create a simple object for message that only has content attribute
+        class MockMessage:
+            def __init__(self):
+                self.content = "This is a test response from OpenAI-compatible endpoint."
+        
+        self.mock_response.choices[0].message = MockMessage()
+        self.mock_response.usage = Mock()
+        self.mock_response.usage.total_tokens = 100
+    
+    @patch('call_language_model.OpenAI')
+    def test_openai_compatible_model_init(self, mock_openai):
+        """Test OpenAI-compatible model initialization."""
+        model = OpenAICompatibleModel(self.mock_credentials)
+        
+        mock_openai.assert_called_once_with(
+            api_key='test-key',
+            base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
+        )
+        self.assertEqual(model.credentials, self.mock_credentials)
+    
+    @patch('call_language_model.OpenAI')
+    def test_generate_success(self, mock_openai):
+        """Test successful text generation."""
+        mock_client = Mock()
+        mock_client.chat.completions.create.return_value = self.mock_response
+        mock_openai.return_value = mock_client
+        
+        model = OpenAICompatibleModel(self.mock_credentials)
+        result = model.generate(
+            system_prompt="You are a helpful assistant.",
+            user_prompt="Hello, world!"
+        )
+        
+        response_text, tokens_used, error = result
+        self.assertEqual(response_text, "This is a test response from OpenAI-compatible endpoint.")
+        self.assertEqual(tokens_used, 100)
+        self.assertIsNone(error)
+    
+    @patch('call_language_model.OpenAI')
+    def test_generate_with_reasoning_content(self, mock_openai):
+        """Test generation with reasoning content."""
+        # Mock response with reasoning content
+        mock_response = Mock()
+        mock_response.choices = [Mock()]
+        
+        class MockMessageWithReasoning:
+            def __init__(self):
+                self.content = "The final answer is 42."
+                self.reasoning_content = "Let me think step by step..."
+        
+        mock_response.choices[0].message = MockMessageWithReasoning()
+        mock_response.usage = Mock()
+        mock_response.usage.total_tokens = 150
+        
+        mock_client = Mock()
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_openai.return_value = mock_client
+        
+        model = OpenAICompatibleModel(self.mock_credentials)
+        result = model.generate(
+            system_prompt="You are a helpful assistant.",
+            user_prompt="What is the answer?"
+        )
+        
+        response_text, tokens_used, error = result
+        self.assertIn("<think>", response_text)
+        self.assertIn("Let me think step by step...", response_text)
+        self.assertIn("</think>", response_text)
+        self.assertIn("The final answer is 42.", response_text)
+        self.assertEqual(tokens_used, 150)
+        self.assertIsNone(error)
+    
+    @patch('call_language_model.OpenAI')
+    def test_generate_stream_collected(self, mock_openai):
+        """Test streaming generation with collected results."""
+        # Create custom delta classes that only have content attribute
+        class MockDelta1:
+            def __init__(self):
+                self.content = "Hello"
+                self.reasoning_content = None
+        
+        class MockDelta2:
+            def __init__(self):
+                self.content = " world!"
+                self.reasoning_content = None
+        
+        # Mock streaming response with proper delta structure
+        mock_chunk1 = Mock()
+        mock_chunk1.choices = [Mock()]
+        mock_chunk1.choices[0].delta = MockDelta1()
+        mock_chunk1.usage = None
+        
+        mock_chunk2 = Mock()
+        mock_chunk2.choices = [Mock()]
+        mock_chunk2.choices[0].delta = MockDelta2()
+        mock_chunk2.usage = Mock()
+        mock_chunk2.usage.total_tokens = 50
+        
+        mock_stream = [mock_chunk1, mock_chunk2]
+        
+        mock_client = Mock()
+        mock_client.chat.completions.create.return_value = mock_stream
+        mock_openai.return_value = mock_client
+        
+        model = OpenAICompatibleModel(self.mock_credentials)
+        result = model.generate_stream(
+            system_prompt="You are a helpful assistant.",
+            user_prompt="Hello!",
+            collect=True
+        )
+        
+        response_text, tokens_used, error = result
+        self.assertEqual(response_text, "Hello world!")
+        self.assertEqual(tokens_used, 50)
         self.assertIsNone(error)
 
 
@@ -428,11 +570,11 @@ class TestMainFunctions(unittest.TestCase):
         os.unlink(self.temp_config_file.name)
     
     @patch('call_language_model.OpenAIModel')
-    def test_call_language_model_with_config_file(self, mock_openai_model):
-        """Test call_language_model function with config file."""
+    def test_call_language_model_openai_provider(self, mock_openai_model):
+        """Test call_language_model function with OpenAI provider (uses /responses endpoint)."""
         # Mock model instance
         mock_model_instance = Mock()
-        mock_model_instance.generate.return_value = ("Test response", 100, None)
+        mock_model_instance.generate.return_value = ("OpenAI response", 100, None)
         mock_openai_model.return_value = mock_model_instance
         
         result = call_language_model(
@@ -444,9 +586,45 @@ class TestMainFunctions(unittest.TestCase):
         )
         
         response_text, tokens_used, error = result
-        self.assertEqual(response_text, "Test response")
+        self.assertEqual(response_text, "OpenAI response")
         self.assertEqual(tokens_used, 100)
         self.assertIsNone(error)
+        mock_openai_model.assert_called_once()
+    
+    @patch('call_language_model.OpenAICompatibleModel')
+    def test_call_language_model_compatible_provider(self, mock_compatible_model):
+        """Test call_language_model function with OpenAI-compatible provider (uses /chat/completions endpoint)."""
+        # Add aliyun provider to test config
+        self.test_config['all_models'].append({
+            'provider': 'aliyun',
+            'model_name': ['qwen-max'],
+            'api_key': 'test-aliyun-key',
+            'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+        })
+        
+        # Update config file
+        import yaml
+        with open(self.temp_config_file.name, 'w') as f:
+            yaml.dump(self.test_config, f)
+        
+        # Mock model instance
+        mock_model_instance = Mock()
+        mock_model_instance.generate.return_value = ("Aliyun response", 120, None)
+        mock_compatible_model.return_value = mock_model_instance
+        
+        result = call_language_model(
+            model_provider='aliyun',
+            model_name='qwen-max',
+            system_prompt='You are a helpful assistant.',
+            user_prompt='Hello!',
+            config_path=self.temp_config_file.name
+        )
+        
+        response_text, tokens_used, error = result
+        self.assertEqual(response_text, "Aliyun response")
+        self.assertEqual(tokens_used, 120)
+        self.assertIsNone(error)
+        mock_compatible_model.assert_called_once()
     
     @patch('call_language_model.OpenAIModel')
     def test_call_language_model_with_custom_config(self, mock_openai_model):
@@ -474,6 +652,36 @@ class TestMainFunctions(unittest.TestCase):
         self.assertEqual(tokens_used, 150)
         self.assertIsNone(error)
     
+    @patch('call_language_model.OpenAIModel')
+    def test_call_language_model_with_additional_params(self, mock_openai_model):
+        """Test call_language_model function with additional parameters (kwargs)."""
+        # Mock model instance
+        mock_model_instance = Mock()
+        mock_model_instance.generate.return_value = ("Response with thinking", 200, None)
+        mock_openai_model.return_value = mock_model_instance
+        
+        result = call_language_model(
+            model_provider='openai',
+            model_name='gpt-4o',  # Use a model that exists in test config
+            system_prompt='You are a helpful assistant.',
+            user_prompt='Solve this problem step by step.',
+            thinking_effort='high',  # Correct parameter name for OpenAI
+            max_completion_tokens=2000,  # Correct parameter name
+            config_path=self.temp_config_file.name
+        )
+        
+        response_text, tokens_used, error = result
+        self.assertEqual(response_text, "Response with thinking")
+        self.assertEqual(tokens_used, 200)
+        self.assertIsNone(error)
+        
+        # Verify that the additional parameters were passed to the model
+        call_args = mock_model_instance.generate.call_args
+        self.assertIn('thinking_effort', call_args.kwargs)
+        self.assertIn('max_completion_tokens', call_args.kwargs)
+        self.assertEqual(call_args.kwargs['thinking_effort'], 'high')
+        self.assertEqual(call_args.kwargs['max_completion_tokens'], 2000)
+
     @patch('call_language_model.OpenAIEmbeddingModel')
     def test_call_embedding_model(self, mock_embedding_model):
         """Test call_embedding_model function."""

@@ -4,17 +4,19 @@
 
 ## 主要特点
 
-- 通过OpenAI兼容接口支持多种模型提供商（OpenAI、阿里云、火山引擎等）
-- 支持 Ollama 本地模型调用
-- 支持多模态输入（文本 + 图像）
-- **支持嵌入模型调用**，提供统一的向量生成接口
-- **支持批量并行调用**，可同时处理多个请求，提高处理效率
-- **进度条显示**，批量处理时可实时查看处理进度和成功率
-- **结果保存功能**，支持将批量调用结果保存到JSONL文件
-- **真正的流式调用**，支持实时输出和收集模式
-- **自定义配置支持**，可通过代码直接配置而无需配置文件
+- **支持OpenAI的/responses端点和兼容接口**：OpenAI提供商使用原生/responses端点（支持推理内容显示），其他提供商使用/chat/completions端点
+- **支持多种模型提供商**：OpenAI、阿里云、火山引擎、Ollama本地模型等
+- **增强的推理模式支持**：自动检测和显示推理内容（reasoning content），支持OpenAI的o1系列模型
+- **支持多模态输入**：文本 + 图像的多模态处理
+- **支持嵌入模型调用**：提供统一的向量生成接口
+- **支持批量并行调用**：可同时处理多个请求，提高处理效率
+- **进度条显示**：批量处理时可实时查看处理进度和成功率
+- **结果保存功能**：支持将批量调用结果保存到JSONL文件
+- **真正的流式调用**：支持实时输出和收集模式
+- **自定义配置支持**：可通过代码直接配置而无需配置文件
+- **增强的错误处理**：内置重试机制、网络错误处理和详细的错误日志
+- **灵活的参数传递**：支持传递任意额外的API参数
 - 统一的调用接口，简化集成过程，直接返回结果和信息，免去记忆多种API格式的烦恼
-- 详细的日志记录，内置错误处理和重试机制
 
 ## 安装
 
@@ -32,17 +34,17 @@ pip install pyyaml openai ollama tqdm
 # 语言模型配置
 all_models:
   - provider: "openai"
-    model_name: ["gpt-4o", "gpt-4o-mini", "gpt-4.1-nano"]
+    model_name: ["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o"]
     api_key: "your_openai_api_key"
     base_url: "https://api.openai.com/v1"
   
   - provider: "aliyun"
-    model_name: ["qwen2.5-32b-instruct", "qwen-turbo", "qwen-max", "qwq-32b", "qwen3-4b", "qwen3-8b"]
+    model_name: ["qwen-max", "qwq-32b", "qwen3-235b-a22b-2507", "qwen3-4b", "qwen3-8b"]
     api_key: "your_aliyun_api_key"
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   
   - provider: "volcengine"
-    model_name: ["deepseek-r1-250528", "deepseek-v3-250324", "doubao-1-5-pro-256k-250115"]
+    model_name: ["deepseek-r1-250528", "deepseek-v3-250324", "doubao-seed-1-6-thinking-250615"]
     api_key: "your_volcengine_api_key"
     base_url: "https://ark.cn-beijing.volces.com/api/v3/"
   
@@ -53,7 +55,7 @@ all_models:
 # 嵌入模型配置
 embedding_models:
   - provider: "openai"
-    model_name: ["text-embedding-3-small"]
+    model_name: ["text-embedding-3-small", "text-embedding-3-large"]
     api_key: "your_openai_api_key"
     base_url: "https://api.openai.com/v1"
   
@@ -76,6 +78,19 @@ response_text, tokens_used, error = call_language_model(
     system_prompt="You are a helpful assistant.",
     user_prompt="请介绍一下量子计算的基本原理",
     temperature=0.7
+)
+
+# 推理模型调用（OpenAI）
+response_text, tokens_used, error = call_language_model(
+    model_provider='openai',
+    model_name='gpt-5',
+    system_prompt="You are a helpful assistant.",
+    user_prompt="Give a matrix multiplication algorithm as fast as possible. Think hard about this.",
+    reasoning={ # 推理配置
+        "effort": "high",  # 推理强度：low, medium, high
+        "summary": "auto",
+    },
+    max_output_tokens=32768
 )
 
 # 多模态调用
@@ -133,19 +148,39 @@ if not error and response_stream:
             content = chunk.message.content
             print(content, end='', flush=True)
 
-# 启用推理模式（仅对Qwen3系列模型有效）
-response_text, tokens_used, error = call_language_model(
-    model_provider='aliyun',
-    model_name='qwen3-4b',
+# OpenAI推理模型流式调用（自动处理推理内容）
+response_stream, tokens_used, error = call_language_model(
+    model_provider='openai',
+    model_name='gpt-5',
     system_prompt="You are a helpful assistant.",
-    user_prompt="解决这个数学问题：2x + 5 = 15",
-    enable_thinking=True  # 启用推理模式
+    user_prompt="Give a matrix multiplication algorithm as fast as possible. Think hard about this.",
+    stream=True,
+    collect=False,
+    reasoning={
+        "effort": "medium",
+        "summary": "auto"
+    }
 )
+
+# 处理OpenAI推理模型的流式响应
+is_first_chunk = True
+if not error and response_stream:
+    for chunk in response_stream:
+        if chunk.type == 'response.reasoning_summary_text.delta':
+            if is_first_chunk:
+                print("\n<think>\n", end='', flush=True)
+                is_first_chunk = False
+            if chunk.delta:
+                print(f"{chunk.delta}", end='', flush=True)
+        elif chunk.type == 'response.output_text.delta':
+            if not is_first_chunk:
+                print("\n</think>\n", end='', flush=True)
+                is_first_chunk = True
 
 # 跳过模型检查（直接使用指定模型名）
 response_text, tokens_used, error = call_language_model(
     model_provider='openai',
-    model_name='gpt-4.1',
+    model_name='gpt-5-nano',
     system_prompt="You are a helpful assistant.",
     user_prompt="Hello!",
     skip_model_checking=True  # 跳过配置文件中的模型名称检查
@@ -237,11 +272,10 @@ batch_requests = [
 # 批量并行调用
 batch_results = batch_call_language_model(
     model_provider='openai',
-    model_name='gpt-4o-mini',
+    model_name='gpt-5-mini',
     requests=batch_requests,
     max_workers=3,  # 并行处理3个请求
     stream=False,   # 批量模式不支持真正的流式调用
-    enable_thinking=False,
     temperature=0.7,
     skip_model_checking=True,
     config_path="./llm_config.yaml"
@@ -250,7 +284,7 @@ batch_results = batch_call_language_model(
 # 带进度条和文件保存的批量调用
 batch_results = batch_call_language_model(
     model_provider='openai',
-    model_name='gpt-4o-mini',
+    model_name='gpt-5-mini',
     requests=batch_requests,
     max_workers=3,
     output_file="batch_results.jsonl",  # 保存结果到JSONL文件
@@ -289,15 +323,21 @@ batch_results = batch_call_language_model(
 
 ### `call_language_model` 函数参数
 
-- `model_provider`: 模型提供商，如 "openai", "aliyun", "volcengine", "ollama"
+- `model_provider`: 模型提供商，如 "openai"（使用/responses端点）, "aliyun", "volcengine"（使用/chat/completions端点）, "ollama"
 - `model_name`: 模型名称，需在配置文件中定义（除非设置skip_model_checking=True）
 - `system_prompt`: 系统提示
 - `user_prompt`: 用户提示
 - `stream`: 是否流式调用（默认 False）
 - `collect`: 流式调用时是否收集结果（默认 True）。设为False时返回流对象，需自行处理
-- `enable_thinking`: 是否启用推理模式，仅对Qwen3系列模型有效（默认 True）
 - `temperature`: 温度参数，控制输出随机性（可选）
 - `max_tokens`: 最大生成 token 数（可选）
+- `files`: 图片文件路径列表，用于多模态输入（可选）
+- `skip_model_checking`: 是否跳过模型名称检查，设为True时可使用任意模型名（默认 False）
+- `config_path`: 配置文件路径（默认 "./llm_config.yaml"）
+- `custom_config`: 自定义配置字典，包含api_key和base_url，优先于config_path（可选）
+- `thinking_effort`: 推理强度，仅对OpenAI推理模型有效，可选值："low", "medium", "high"（可选）
+- `max_completion_tokens`: 最大完成tokens数，用于控制回复长度（可选）
+- `**kwargs`: 其他任意API参数，会直接传递给底层API调用
 - `files`: 图片文件路径列表，用于多模态输入（可选）
 - `skip_model_checking`: 是否跳过模型名称检查，设为True时可使用任意模型名（默认 False）
 - `config_path`: 配置文件路径（默认 "./llm_config.yaml"）
@@ -315,13 +355,12 @@ batch_results = batch_call_language_model(
 
 ### `batch_call_language_model` 函数参数
 
-- `model_provider`: 模型提供商，如 "openai", "aliyun", "volcengine", "ollama"
+- `model_provider`: 模型提供商，如 "openai"（使用/responses端点）, "aliyun", "volcengine"（使用/chat/completions端点）, "ollama"
 - `model_name`: 模型名称，需在配置文件中定义（除非设置skip_model_checking=True）
 - `requests`: 请求列表，每个元素为字典，包含system_prompt, user_prompt和可选的files字段
   - 格式: `[{"system_prompt": "...", "user_prompt": "...", "files": [...]}, ...]`
 - `max_workers`: 最大并行工作线程数（默认 5）
 - `stream`: 是否流式调用（默认 False），设为True时收集流式响应，不支持真正的流式调用
-- `enable_thinking`: 是否启用推理模式，仅对Qwen3系列模型有效（默认 True）
 - `temperature`: 温度参数，控制输出随机性（可选）
 - `max_tokens`: 最大生成 token 数（可选）
 - `skip_model_checking`: 是否跳过模型名称检查（默认 False）
@@ -329,6 +368,7 @@ batch_results = batch_call_language_model(
 - `custom_config`: 自定义配置字典，包含api_key和base_url，优先于config_path（可选）
 - `output_file`: 输出JSONL文件路径（可选）。如果提供，将保存所有结果到指定文件
 - `show_progress`: 是否显示进度条（默认 True）
+- `**kwargs`: 其他任意API参数，会直接传递给底层API调用（如thinking_effort、max_completion_tokens等）
 
 ## 返回值说明
 
@@ -362,22 +402,6 @@ batch_results = batch_call_language_model(
 - `model_provider`: 使用的模型提供商
 - `model_name`: 使用的模型名称
 - `timestamp`: 处理完成的时间戳
-
-## 高级功能
-
-### 推理模式（Thinking Mode）
-
-对于Qwen3系列模型，支持显示推理过程：
-
-```python
-response, tokens, error = call_language_model(
-    model_provider='aliyun',
-    model_name='qwen3-4b',
-    system_prompt="You are a helpful assistant.",
-    user_prompt="解决这个复杂的数学问题",
-    enable_thinking=True  # 启用推理模式
-)
-```
 
 ### 自定义配置
 
@@ -474,14 +498,16 @@ print(f"成功率: {success_rate:.1f}%, 总Token使用: {total_tokens}")
 
 ## 注意事项
 
-- 支持 OpenAI 兼容接口和 Ollama 两种主流调用方式
-- **支持真正的流式调用**，设置 `stream=True, collect=False` 可获得实时输出流
-- **支持批量并行调用**，使用 `batch_call_language_model` 函数可同时处理多个请求
+- **支持两种API端点**：OpenAI提供商使用原生/responses端点（支持推理内容），其他提供商使用/chat/completions端点
+- **增强的推理支持**：OpenAI o1系列模型支持推理过程显示和推理强度控制
+- **支持真正的流式调用**：设置 `stream=True, collect=False` 可获得实时输出流
+- **支持批量并行调用**：使用 `batch_call_language_model` 函数可同时处理多个请求
+- **增强的错误处理**：内置重试机制，支持网络错误和连接超时的自动重试
+- **灵活的参数传递**：支持通过kwargs传递任意自定义API参数
 - 支持嵌入模型调用，OpenAI提供商仅支持文本嵌入，Ollama支持多模态嵌入
 - 批量调用模式下不支持真正的流式调用，仅支持收集模式的流式调用
 - 不支持多轮对话
-- Qwen3系列模型支持推理模式（`enable_thinking`参数）
-- 流式调用时无法准确统计token消耗，直接返回0
+- 流式调用时部分模型无法准确统计token消耗
 - 可通过`custom_config`参数直接配置API密钥，无需配置文件
 
 ## 日志
@@ -525,7 +551,7 @@ for text in texts:
 # 使用批量调用功能（带进度条和文件保存）
 results = batch_call_language_model(
     model_provider='openai',
-    model_name='gpt-4o-mini',
+    model_name='gpt-5-mini',
     requests=batch_requests,
     max_workers=3,  # 并行处理3个请求
     temperature=0.7,
