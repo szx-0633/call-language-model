@@ -21,9 +21,11 @@
 ## 安装
 
 下载本文件，并通过下面的命令安装依赖项
+使用前，请确保将OpenAI库升级至1.88.0以上版本，或直接安装最新版本，低版本可能导致response接入点不可用
 
 ```bash
 pip install pyyaml openai ollama tqdm
+pip install -U openai
 ```
 
 ## 快速开始
