@@ -24,7 +24,6 @@
 
 ```bash
 pip install pyyaml openai ollama tqdm
-pip install -U openai
 ```
 
 ## 快速开始
@@ -442,12 +441,13 @@ response, tokens, error = call_language_model(
 
 ## 典型的自定义参数
 
-OpenAI推理模型的推理努力设置：
+### OpenAI推理模型的推理努力设置：
 reasoning = {
     "effort": "high",  # 推理强度：low, medium, high
     "summary": "auto"  # 推理内容总结，注意OpenAI不支持完整推理内容返回
 }
-Qwen3系列模型的推理开启设置：
+
+### Qwen3系列模型的推理开启设置：
 extra_body={
     "enable_reasoning": True,  # 开启推理
 }

@@ -27,7 +27,7 @@ from openai.types.responses import Response
 from openai.types.chat import ChatCompletion
 from tqdm import tqdm
 
-# 使用前，请将OpenAI库升级至1.88.0以上版本，低版本可能导致response接入点不可用
+# NOTE:使用前，请将OpenAI库升级至1.88.0以上版本，低版本可能导致response接入点不可用
 
 # 配置文件格式：llm_config.yaml，需要放在检查本文件所在路径内或者指定其路径
 # 当前支持多种模型提供商，也可自行添加提供商和模型名称，但仅支持openai（包含openai官方接入点和兼容接入点）和ollama两种渠道调用模型
@@ -37,6 +37,16 @@ from tqdm import tqdm
 # 支持使用嵌入模型，需使用call_embedding_model函数调用，暂不支持多模态嵌入
 # 支持批量并行调用大语言模型，使用batch_call_language_model函数，该模式下不支持真正的流式调用
 # 批量调用支持tqdm进度条显示和结果保存到JSONL文件
+# 典型的自定义参数
+# OpenAI推理模型的推理努力设置：
+# reasoning = {
+#     "effort": "high",  # 推理强度：low, medium, high
+#     "summary": "auto"  # 推理内容总结，注意OpenAI不支持完整推理内容返回
+# }
+# Qwen3系列模型的推理开启设置：
+# extra_body={
+#     "enable_reasoning": True,  # 开启推理
+# }
 
 # 示例自定义配置（优先于配置文件）：
 # custom_config = {
@@ -364,6 +374,14 @@ class OpenAIModel(BaseModel):
                         print(f"API request failed after {max_retries} attempts: {str(e)}")
                         logging.error(error_msg)
                         return "", 0, error_msg
+                elif "Empty response received" in str_e:
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Empty response received: {str(e)}, retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                    else:
+                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
+                        logging.error(error_msg)
+                        return "", 0, error_msg
                 elif "NoneType" in str_e:
                     if attempt < max_retries - 1:
                         logging.warning(f"Error: Did not receive response object, retrying in {retry_delay}s...")
@@ -379,6 +397,46 @@ class OpenAIModel(BaseModel):
                     print(f"OpenAI API error: {str(e)}")
                     logging.error(error_msg)
                     return "", 0, error_msg
+
+    def _parse_streaming_response(self, stream) -> tuple[str, int, str]:
+        """Parse OpenAI streaming API response.
+        
+        Args:
+            stream: Streaming response object from OpenAI API.
+            
+        Returns:
+            Tuple containing (response_text, token_count, error_message).
+        """
+        complete_response = ""
+        reasoning_content = ""
+        
+        for chunk in stream:
+            last_chunk = chunk
+            if chunk.type == 'response.reasoning_summary_text.delta':
+                if chunk.delta:
+                    reasoning_content += chunk.delta
+            elif chunk.type == 'response.output_text.delta':
+                if chunk.delta:
+                    complete_response += chunk.delta
+            else:
+                # print(chunk)
+                continue
+        
+        tokens = 0
+        if hasattr(last_chunk, 'response'):
+            if hasattr(last_chunk.response, 'usage'):
+                if hasattr(last_chunk.response.usage, 'total_tokens'):
+                    tokens = last_chunk.response.usage.total_tokens
+
+        # Add reasoning content into response
+        if reasoning_content:
+            complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
+
+        # Check for empty response in collected stream mode - trigger retry
+        if not complete_response or complete_response.strip() == "":
+            raise Exception("Empty response received from streaming API")
+
+        return complete_response, tokens, None
 
     def generate_stream(self, **kwargs) -> tuple[str, int, str]:
         """Generate streaming response.
@@ -417,35 +475,21 @@ class OpenAIModel(BaseModel):
                     # return the whole stream if not collecting
                     return stream, 0, None
                 else:
-                    for chunk in stream:
-                        last_chunk = chunk
-                        if chunk.type == 'response.reasoning_summary_text.delta':
-                            if chunk.delta:
-                                reasoning_content += chunk.delta
-                        elif chunk.type == 'response.output_text.delta':
-                            if chunk.delta:
-                                complete_response += chunk.delta
-                        else:
-                            # print(chunk)
-                            continue
-                    
-                    tokens = 0
-                    if hasattr(last_chunk, 'response'):
-                        if hasattr(last_chunk.response, 'usage'):
-                            if hasattr(last_chunk.response.usage, 'total_tokens'):
-                                tokens = last_chunk.response.usage.total_tokens
-
-                    # Add reasoning content into response
-                    if reasoning_content:
-                        complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
-
-                    return complete_response, tokens, None
+                    return self._parse_streaming_response(stream)
 
             except Exception as e:
                 str_e = str(e).lower()
                 if "timeout" in str_e or "connection error" in str_e:
                     if attempt < max_retries - 1:
                         logging.warning(f"Network error: {str(e)}, retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                    else:
+                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
+                        logging.error(error_msg)
+                        return complete_response, int(estimated_tokens), error_msg
+                elif "Empty response received" in str_e:
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Empty response received: {str(e)}, retrying in {retry_delay}s...")
                         time.sleep(retry_delay)
                     else:
                         error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
@@ -485,6 +529,10 @@ class OpenAIModel(BaseModel):
         # Add reasoning content to complete response
         if reasoning_content:
             complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
+        
+        # Check for empty response - trigger retry
+        if not complete_response or complete_response.strip() == "":
+            raise Exception("Empty response received from API")
         
         return (
             complete_response,
@@ -616,6 +664,14 @@ class OpenAICompatibleModel(BaseModel):
                         print(f"API request failed after {max_retries} attempts: {str(e)}")
                         logging.error(error_msg)
                         return "", 0, error_msg
+                elif "Empty response received" in str_e:
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Empty response received: {str(e)}, retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                    else:
+                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
+                        logging.error(error_msg)
+                        return "", 0, error_msg
                 elif "NoneType" in str_e:
                     if attempt < max_retries - 1:
                         logging.warning(f"Error: Did not receive response object, retrying in {retry_delay}s...")
@@ -631,6 +687,51 @@ class OpenAICompatibleModel(BaseModel):
                     print(f"OpenAI API error: {str(e)}")
                     logging.error(error_msg)
                     return "", 0, error_msg
+
+    def _parse_streaming_response(self, stream) -> tuple[str, int, str]:
+        """Parse OpenAI-compatible streaming API response.
+        
+        Args:
+            stream: Streaming response object from OpenAI-compatible API.
+            
+        Returns:
+            Tuple containing (response_text, token_count, error_message).
+        """
+        complete_response = ""
+        reasoning_content = ""
+        returned_tokens = None
+        
+        for chunk in stream:
+            # print(chunk)
+            if chunk.choices and len(chunk.choices) > 0:
+                delta = chunk.choices[0].delta
+
+                # Parse content
+                if hasattr(delta, 'content') and delta.content is not None:
+                    content = delta.content
+                    complete_response += content
+
+                # Parse reasoning_content
+                if hasattr(delta, 'reasoning_content') and delta.reasoning_content is not None:
+                    reasoning_content += delta.reasoning_content
+            
+            if hasattr(chunk, 'usage') and hasattr(chunk.usage, 'total_tokens'):
+                returned_tokens = chunk.usage.total_tokens
+
+        if returned_tokens:
+            tokens = returned_tokens
+        else:
+            tokens = 0
+
+        # Add reasoning_content into response
+        if reasoning_content:
+            complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
+
+        # Check for empty response in collected stream mode - trigger retry
+        if not complete_response or complete_response.strip() == "":
+            raise Exception("Empty response received from streaming API")
+
+        return complete_response, tokens, None
 
     def generate_stream(self, **kwargs) -> tuple[str, int, str]:
         """Generate streaming response.
@@ -669,40 +770,21 @@ class OpenAICompatibleModel(BaseModel):
                     # Directly return the stream if collect==False
                     return stream, 0, None
                 else:
-                    returned_tokens = None
-                    for chunk in stream:
-                        # print(chunk)
-                        if chunk.choices and len(chunk.choices) > 0:
-                            delta = chunk.choices[0].delta
-
-                            # Parse content
-                            if hasattr(delta, 'content') and delta.content is not None:
-                                content = delta.content
-                                complete_response += content
-
-                            # Parse reasoning_content
-                            if hasattr(delta, 'reasoning_content') and delta.reasoning_content is not None:
-                                reasoning_content += delta.reasoning_content
-                        
-                        if hasattr(chunk, 'usage') and hasattr(chunk.usage, 'total_tokens'):
-                            returned_tokens = chunk.usage.total_tokens
-
-                    if returned_tokens:
-                        tokens = returned_tokens
-                    else:
-                        tokens = 0
-
-                    # Add reasoning_content into response
-                    if reasoning_content:
-                        complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
-
-                    return complete_response, tokens, None
+                    return self._parse_streaming_response(stream)
 
             except Exception as e:
                 str_e = str(e).lower()
                 if "timeout" in str_e or "connection error" in str_e:
                     if attempt < max_retries - 1:
                         logging.warning(f"Network error: {str(e)}, retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                    else:
+                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
+                        logging.error(error_msg)
+                        return complete_response, int(estimated_tokens), error_msg
+                elif "Empty response received" in str_e:
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Empty response received: {str(e)}, retrying in {retry_delay}s...")
                         time.sleep(retry_delay)
                     else:
                         error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
@@ -727,6 +809,11 @@ class OpenAICompatibleModel(BaseModel):
         if hasattr(response.choices[0].message, 'reasoning_content'):
             complete_response = "<think>\n" + str(response.choices[0].message.reasoning_content) + "\n</think>\n\n" + \
                                 response.choices[0].message.content
+        
+        # Check for empty response - trigger retry
+        if not complete_response or complete_response.strip() == "":
+            raise Exception("Empty response received from API")
+        
         return (
             complete_response,
             response.usage.total_tokens if response.usage else 0,
@@ -796,6 +883,34 @@ class OllamaModel(BaseModel):
             print(f"Ollama API error: {str(e)}")
             return "", 0, str(e)
 
+    def _parse_streaming_response(self, stream) -> tuple[str, int, str]:
+        """Parse Ollama streaming API response.
+        
+        Args:
+            stream: Streaming response object from Ollama API.
+            
+        Returns:
+            Tuple containing (response_text, token_count, error_message).
+        """
+        complete_response = ""
+        
+        # Collect streaming results
+        for chunk in stream:
+            if hasattr(chunk, 'message') and chunk.message and hasattr(chunk.message, 'content'):
+                content = chunk.message.content
+                complete_response += content
+
+        # Note: streaming calls don't support precise token consumption statistics
+        tokens = 0
+        if hasattr(stream, 'eval_count') and hasattr(stream, 'prompt_eval_count'):
+            tokens = stream.eval_count + stream.prompt_eval_count
+
+        # Check for empty response in collected stream mode - trigger retry
+        if not complete_response or complete_response.strip() == "":
+            raise Exception("Empty response received from streaming API")
+
+        return complete_response, tokens, None
+
     def generate_stream(self, **kwargs) -> tuple[str, int, str]:
         """Generate streaming response from Ollama model.
         
@@ -855,18 +970,7 @@ class OllamaModel(BaseModel):
                     # If not collecting stream results, return stream object directly
                     return stream, 0, None
                 else:
-                    # Collect streaming results
-                    for chunk in stream:
-                        if hasattr(chunk, 'message') and chunk.message and hasattr(chunk.message, 'content'):
-                            content = chunk.message.content
-                            complete_response += content
-
-                    # Note: streaming calls don't support precise token consumption statistics
-                    tokens = 0
-                    if hasattr(stream, 'eval_count') and hasattr(stream, 'prompt_eval_count'):
-                        tokens = stream.eval_count + stream.prompt_eval_count
-
-                    return complete_response, tokens, None
+                    return self._parse_streaming_response(stream)
 
             except Exception as e:
                 str_e = str(e).lower()
@@ -880,6 +984,14 @@ class OllamaModel(BaseModel):
                         print(f"API request failed after {max_retries} attempts: {str(e)}")
                         logging.error(error_msg)
                         return complete_response, int(estimated_tokens), error_msg
+                elif "Empty response received" in str_e:
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Empty response received: {str(e)}, retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                    else:
+                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
+                        logging.error(error_msg)
+                        return "", 0, error_msg
                 else:
                     error_msg = f"Ollama API error: {str(e)}"
                     print(f"Ollama API error: {str(e)}")
@@ -889,6 +1001,11 @@ class OllamaModel(BaseModel):
     def _parse_response(self, response) -> tuple[str, int, str]:
         tokens_used = response.eval_count + response.prompt_eval_count
         complete_response = response.message.content
+        
+        # Check for empty response - trigger retry
+        if not complete_response or complete_response.strip() == "":
+            raise Exception("Empty response received from API")
+        
         return (
             complete_response,
             tokens_used,
@@ -1145,7 +1262,7 @@ def call_language_model(
         config_path: Configuration file path, mutually exclusive with custom_config.
         custom_config: Custom configuration dict instead of file, mutually exclusive with config_path.
                       Must contain base_url and api_key fields. Overrides config_path when valid.
-        **kwargs: Any additional parameters will be passed directly to the underlying API call. For example, enable_thinking, thinking_effort, completion_tokens...
+        **kwargs: Any additional parameters will be passed directly to the underlying API call. For example, enable_thinking, reasoning_effort, max_output_tokens...
         
     Returns:
         Tuple containing (response_text, tokens_used, error_message).
@@ -1322,7 +1439,8 @@ def batch_call_language_model(
         **kwargs
 ) -> List[Dict]:
     """Batch parallel calling language model unified entry function.
-    
+    This is a wrap of real-time calling, not async batch calling (which will make you wait for hours before getting response),
+      so it will cost the same money as real-time calling.
     This mode does not support true streaming calls.
     
     Args:
@@ -1339,7 +1457,7 @@ def batch_call_language_model(
         custom_config: Custom configuration dict instead of file, mutually exclusive with config_path.
         output_file: Output JSONL file path, optional. If provided, saves all results to specified file.
         show_progress: Whether to show progress bar (default True).
-        **kwargs: Any additional parameters will be passed directly to the underlying API call. For example, enable_thinking, thinking_effort, completion_tokens...
+        **kwargs: Any additional parameters will be passed directly to the underlying API call. For example, enable_thinking, reasoning_effort, max_output_tokens...
         
     Returns:
         List of result dictionaries containing request_index, response_text, tokens_used, error_msg fields.
