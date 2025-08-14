@@ -4,27 +4,27 @@
 
 ## 主要特点
 
-- **支持OpenAI的/responses端点和兼容接口**：OpenAI提供商使用原生/responses端点（支持推理内容显示），其他提供商使用/chat/completions端点
-- **支持多种模型提供商**：OpenAI、阿里云、火山引擎、Ollama本地模型等
+- **支持多种模型提供商**：OpenAI、OpenAI兼容（阿里云、火山引擎）、Ollama本地模型等
 - **支持多模态输入**：文本 + 图像的多模态处理
 - **支持嵌入模型调用**：提供统一的向量生成接口
 - **支持批量并行调用**：可同时处理多个请求，提高处理效率
 - **进度条显示**：批量处理时可实时查看处理进度和成功率
 - **实时结果保存**：批量调用时支持实时保存结果到JSONL文件，每完成一个请求立即保存，避免因程序中断丢失结果
-- **真正的流式调用**：支持实时输出和收集模式
+- **真正的流式调用**：支持实时输出和收集模式，您可以像使用OpenAI或ollama官方库完全一致的方式处理输出流
 - **自定义配置支持**：可通过代码直接配置而无需配置文件
 - **增强的错误处理**：内置重试机制、网络错误处理和详细的错误日志
-- **灵活的参数传递**：支持传递任意额外的API参数
+- **灵活的参数传递**：支持传递任意额外的API参数，包括推理强度、输出token限制等
 - 统一的调用接口，简化集成过程，直接返回结果和信息，免去记忆多种API格式的烦恼
 
 ## 安装
 
-下载本文件，并通过下面的命令安装依赖项
-使用前，请确保将OpenAI库升级至1.88.0以上版本，或直接安装最新版本，低版本可能导致response接入点不可用
+下载本文件，并通过下面的命令安装依赖项。使用前，请确保安装最新版本的依赖库，特别是requests库用于HTTP请求处理：
 
 ```bash
-pip install pyyaml openai ollama tqdm
+pip install pyyaml requests tqdm
 ```
+
+**注意**：本工具不依赖OpenAI或Ollama的Python库，而是直接使用requests库进行HTTP API调用，这样可以更好地控制请求过程和错误处理。
 
 ## 快速开始
 
@@ -50,6 +50,7 @@ all_models:
   
   - provider: "ollama"
     model_name: ["llama3.1:8b", "qwen3:4b", "qwen3:8b"]
+    api_key: "placeholder"  # Ollama不需要API密钥，但配置中需要存在
     base_url: "http://localhost:11434"
 
 # 嵌入模型配置
@@ -61,6 +62,7 @@ embedding_models:
   
   - provider: "ollama"
     model_name: ["nomic-embed-text", "mxbai-embed-large"]
+    api_key: "placeholder"  # Ollama不需要API密钥，但配置中需要存在
     base_url: "http://localhost:11434"
 ```
 
@@ -141,7 +143,7 @@ if not error and response_stream:
         elif hasattr(delta, 'content') and delta.content:
             print(delta.content, end='', flush=True)
 
-# 处理真正的流式响应（Ollama）
+# 处理Ollama的流式响应
 if not error and response_stream:
     for chunk in response_stream:
         if hasattr(chunk, 'message') and chunk.message and hasattr(chunk.message, 'content'):
@@ -451,11 +453,25 @@ reasoning = {
 extra_body={
     "enable_reasoning": True,  # 开启推理
 }
+```
+
+### Gemini系列模型推理设置
+
+```python
+extra_body = {
+    "generationConfig": {
+        "thinkingConfig": {
+            "includeThoughts": True,  # 返回推理过程
+            "thinkingBudget": 32768,  # 推理过程token限制
+        }
+    }
+}
+```
 
 
 ## 批量处理高级功能
 
-**进度条显示**
+### 进度条显示
 
 批量调用时自动显示处理进度、成功率和失败数：
 
@@ -477,7 +493,7 @@ batch_results = batch_call_language_model(
 )
 ```
 
-**结果保存到JSONL文件**
+### 结果保存到JSONL文件
 
 ```python
 # 保存结果到文件
@@ -493,7 +509,7 @@ batch_results = batch_call_language_model(
 # {"request_index": 1, "request": {...}, "response_text": "...", "tokens_used": 200, "error_msg": null, "model_provider": "openai", "model_name": "gpt-4o-mini", "timestamp": "2025-01-31 10:30:46"}
 ```
 
-**读取和分析保存的结果**
+### 读取和分析保存的结果
 
 ```python
 import json
@@ -523,7 +539,7 @@ print(f"成功率: {success_rate:.1f}%, 总Token使用: {total_tokens}")
 - **灵活的参数传递**：支持通过kwargs传递任意自定义API参数
 - 支持嵌入模型调用，OpenAI提供商仅支持文本嵌入，Ollama支持多模态嵌入
 - 批量调用模式下不支持真正的流式调用，仅支持收集模式的流式调用
-- 不支持多轮对话
+- 不支持多轮对话，每次调用都是独立的单轮对话
 - 流式调用时部分模型无法准确统计token消耗
 - 可通过`custom_config`参数直接配置API密钥，无需配置文件
 

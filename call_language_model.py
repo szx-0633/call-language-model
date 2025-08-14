@@ -19,7 +19,7 @@ import os
 import time
 import types
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Union, Any, Iterator, Tuple
+from typing import Dict, List, Optional, Union, Any, Iterator
 
 import yaml
 import requests
@@ -29,6 +29,7 @@ from tqdm import tqdm
 
 # 配置文件格式：llm_config.yaml，需要放在检查本文件所在路径内或者指定其路径
 # 当前支持多种模型提供商，也可自行添加提供商和模型名称，但仅支持openai（包含openai官方接入点和兼容接入点）和ollama两种渠道调用模型
+# 如果您使用第三方提供的OpenAI模型，请确保其支持/responses端点，否则应设置provider!="OpenAI"以使用兼容的/chat/completions端点
 # 支持流式调用，设置参数collect=True会将流式调用的结果收集后返回，False会将整个流返回
 # 流式调用时部分模型不支持统计token消耗
 # 使用大语言模型的入口函数为call_language_model
