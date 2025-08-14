@@ -18,6 +18,7 @@ import logging
 import os
 import time
 import types
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Union, Any, Iterator
 
@@ -1559,8 +1560,6 @@ def batch_call_language_model(
         logging.warning("Empty requests list provided in batch_call_language_model.")
         return []
 
-    from tqdm import tqdm
-
     # Validate request format
     for i, req in enumerate(requests):
         if not isinstance(req, dict):
@@ -1628,7 +1627,6 @@ def batch_call_language_model(
         pbar = tqdm(total=len(requests), desc="Processing requests", unit="req")
     
     # Create file lock for thread-safe writing
-    import threading
     file_lock = threading.Lock()
     
     # Initialize output file if specified (clear existing content)
