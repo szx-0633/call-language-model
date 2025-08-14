@@ -7,7 +7,7 @@ and embedding models through OpenAI-compatible APIs and Ollama.
 
 @File    : call_language_model.py
 @Author  : Zhangxiao Shen
-@Date    : 2025/8/12
+@Date    : 2025/8/14
 @Description: Call language models and embedding models using OpenAI or Ollama APIs.
 """
 
@@ -17,17 +17,15 @@ import json
 import logging
 import os
 import time
+import types
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any, Iterator, Tuple
 
-import ollama
 import yaml
-from openai import OpenAI
-from openai.types.responses import Response
-from openai.types.chat import ChatCompletion
+import requests
 from tqdm import tqdm
 
-# 使用前，请将OpenAI库升级至1.88.0以上版本，低版本可能导致response接入点不可用
+# NOTE:不需要OpenAI和Ollama库，使用requests模拟，但是调用方法与官方库调用一致
 
 # 配置文件格式：llm_config.yaml，需要放在检查本文件所在路径内或者指定其路径
 # 当前支持多种模型提供商，也可自行添加提供商和模型名称，但仅支持openai（包含openai官方接入点和兼容接入点）和ollama两种渠道调用模型
@@ -37,6 +35,27 @@ from tqdm import tqdm
 # 支持使用嵌入模型，需使用call_embedding_model函数调用，暂不支持多模态嵌入
 # 支持批量并行调用大语言模型，使用batch_call_language_model函数，该模式下不支持真正的流式调用
 # 批量调用支持tqdm进度条显示和结果保存到JSONL文件
+
+# 典型的自定义参数
+# OpenAI推理模型的推理努力设置：
+# reasoning = {
+#     "effort": "high",  # 推理强度：low, medium, high
+#     "summary": "auto"  # 推理内容总结，注意OpenAI不支持完整推理内容返回
+# }
+# Qwen3系列模型的推理开启设置：
+# extra_body={
+#     "enable_reasoning": True,  # 开启推理
+# }
+# Gemini系列模型推理设置：
+# extra_body = {
+#     "generationConfig":{
+#         "thinkingConfig":
+#         {
+#             "includeThoughts": True, # 返回推理过程
+#             "thinkingBudget": 32768, # 推理过程token限制
+#         }
+#     }
+# }
 
 # 示例自定义配置（优先于配置文件）：
 # custom_config = {
@@ -68,6 +87,7 @@ DEFAULT_CONFIG_PATH = './llm_config.yaml'
 DEFAULT_LOG_FILE = './model_api.log'
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 10
+DEFAULT_TIMEOUT_TIME = 300
 
 # Logging configuration
 logging.basicConfig(
@@ -75,6 +95,79 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
+
+
+def _dict_to_namespace(data: Any) -> Any:
+    """
+    Recursively converts a dictionary and its contents to types.SimpleNamespace objects,
+    allowing attribute-style access.
+    """
+    if isinstance(data, dict):
+        namespace = types.SimpleNamespace()
+        for key, value in data.items():
+            setattr(namespace, key, _dict_to_namespace(value))
+        return namespace
+    elif isinstance(data, list):
+        return [_dict_to_namespace(item) for item in data]
+    return data
+
+
+class OpenAIStreamWrapper:
+    """
+    Wraps a requests. Response stream to emulate the behavior of the OpenAI
+    stream object. It parses Server-Sent Events (SSE) and yields
+    structured objects that allow attribute-style access.
+    """
+    def __init__(self, response: requests.Response):
+        self._iterator = response.iter_lines()
+
+    def __iter__(self) -> Iterator[types.SimpleNamespace]:
+        """
+        Yields structured data chunks from the SSE stream.
+        """
+        for line in self._iterator:
+            if line:
+                decoded_line = line.decode('utf-8')
+                if decoded_line.startswith('data: '):
+                    json_str = decoded_line[len('data: '):]
+                    if json_str.strip() == '[DONE]':
+                        break
+                    try:
+                        chunk_dict = json.loads(json_str)
+                        yield _dict_to_namespace(chunk_dict)
+                    except json.JSONDecodeError:
+                        logging.debug(f"Skipping non-JSON line in stream: {decoded_line}")
+                        continue
+                        
+    def __next__(self) -> types.SimpleNamespace:
+        return next(self.__iter__())
+
+
+class OllamaStreamWrapper:
+    """
+    Wraps a requests.Response stream from Ollama's API to emulate the
+    behavior of the official library's stream object. It parses line-delimited
+    JSON and yields structured objects that allow attribute-style access.
+    """
+    def __init__(self, response: requests.Response):
+        self._iterator = response.iter_lines()
+
+    def __iter__(self) -> Iterator[types.SimpleNamespace]:
+        """
+        Yields structured data chunks from the line-delimited JSON stream.
+        """
+        for line in self._iterator:
+            if line:
+                try:
+                    chunk_dict = json.loads(line.decode('utf-8'))
+                    yield _dict_to_namespace(chunk_dict)
+                except json.JSONDecodeError:
+                    logging.debug(f"Skipping non-JSON line in stream: {line.decode('utf-8')}")
+                    continue
+                
+                        
+    def __next__(self) -> types.SimpleNamespace:
+        return next(self.__iter__())
 
 
 class ModelConfig:
@@ -243,59 +336,70 @@ class BaseModel:
 
 
 class OpenAIModel(BaseModel):
-    """OpenAI model (or other models that supports /responses endpoint) handler.
+    """
+    OpenAI model (or other models that supports /responses endpoint) handler.
     THIS IS ONLY for OpenAI /responses endpoint. Specify model_provider="openai" for this method.
-    NOTE: Most third-party provider do NOT support this endpoint.
-    
-    Handles text and multimodal interactions with OpenAI APIs.
+    NOTE: Most third-party providers (including those transfers OpenAI models) do NOT support this endpoint.
     """
 
     def __init__(self, credentials: Dict) -> None:
-        """Initialize OpenAI model with credentials.
+        """
+        Initialize the model handler with credentials.
         
         Args:
             credentials: Dictionary containing API credentials and configuration.
+                         Expected keys: 'api_key', 'base_url'.
         """
         super().__init__(credentials)
-        self.client = OpenAI(
-            api_key=credentials.get('api_key', ''),
-            base_url=credentials.get('base_url', 'https://api.openai.com/v1')
-        )
+        api_key = credentials.get('api_key')
+        base_url = credentials.get('base_url')
+        
+        if base_url.endswith('/'):
+            base_url = base_url[:-1]
+        endpoint_url = f"{base_url}/responses"
+
+        if not api_key or not base_url:
+            raise ValueError("Credentials must include 'api_key' and 'base_url'.")
+
+        self.endpoint_url = endpoint_url
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        })
 
     def _encode_image(self, image_path: str) -> str:
-        """Encode image to base64 string in OpenAI API format.
+        """
+        Encode image to a base64 data URL.
         
         Args:
             image_path: Path to the image file.
             
         Returns:
-            Base64 encoded string with data URL format for OpenAI API.
+            Base64 encoded data URL string.
         """
         with open(image_path, "rb") as img_file:
             base64_str = base64.b64encode(img_file.read()).decode('utf-8')
-            img_format = img_file.name.split('.')[-1]
-            result_str = f"data:image/{img_format};base64,{base64_str}"
-            return result_str
+            img_format = image_path.split('.')[-1]
+            return f"data:image/{img_format};base64,{base64_str}"
 
     def _prepare_messages(self, **kwargs) -> list:
-        """Prepare message format for OpenAI API calls.
-        
-        Handles both text-only and multimodal (text + images) requests.
+        """
+        Prepare the message structure for the API call.
         
         Args:
             **kwargs: Keyword arguments containing system_prompt, user_prompt, and optional files.
             
         Returns:
-            List of message dictionaries formatted for OpenAI API.
+            A list of message dictionaries formatted for the API.
         """
         messages = [{"role": "system", "content": kwargs['system_prompt']}]
         if kwargs.get('files'):
-            # Handle multimodal requests
             messages.append({
                 "role": "user",
                 "content": [
                     {"type": "text", "text": kwargs['user_prompt']},
-                    *[{"type": "image_url", "image_url": {"url": f"{self._encode_image(f)}"}} for f in kwargs['files']]
+                    *[{"type": "image_url", "image_url": {"url": self._encode_image(f)}} for f in kwargs['files']]
                 ]
             })
         else:
@@ -303,13 +407,14 @@ class OpenAIModel(BaseModel):
         return messages
 
     def _prepare_params_for_responses_endpoint(self, messages, **kwargs) -> dict:
-        """Prepare API parameters for OpenAI API calls. This is for the /responses endpoint.
+        """
+        Prepare API parameters for the /responses endpoint.
         
         Handles model-specific configurations and filters out None values.
         
         Args:
             messages: List of message dictionaries.
-            **kwargs: Additional parameters like temperature, max_tokens, etc.
+            **kwargs: Additional parameters like temperature, max_output_tokens, etc.
             
         Returns:
             Dictionary of API parameters with None values filtered out.
@@ -319,236 +424,248 @@ class OpenAIModel(BaseModel):
         params = {
             "model": self.credentials.get('model_name', 'gpt-5'),
             "input": messages,
-            "max_output_tokens": kwargs.get("max_tokens", None),
+            "max_output_tokens": kwargs.get("max_tokens"),
             **kwargs
         }
-        # remove keys in keys_to_remove
         for key in keys_to_remove:
-            try:
-                del params[key]
-            except:
-                pass
-        # only return params not None
+            params.pop(key, None)
         return {k: v for k, v in params.items() if v is not None}
 
     def generate(self, **kwargs) -> tuple[str, int, str]:
-        """Generate non-streaming response.
+        """
+        Generate a non-streaming response from the model.
         
         Args:
-            **kwargs: Keyword arguments including system_prompt, user_prompt, etc.
+            **kwargs: Keyword arguments for the generation request.
             
         Returns:
-            Tuple containing (response_text, status_code, error_message).
+            A tuple containing (response_text, token_count, error_message).
         """
         messages = self._prepare_messages(**kwargs)
         params = self._prepare_params_for_responses_endpoint(messages, **kwargs)
-        # Remove collect
-        if 'collect' in params:
-            del params['collect']
+        params.pop('collect', None)
 
         max_retries = 3
         retry_delay = 10
         for attempt in range(max_retries):
             try:
-                response = self.client.responses.create(**params)
-                return self._parse_response(response)
-            except Exception as e:
-                str_e = str(e).lower()
-                if "timeout" in str_e or "connection error" in str_e:
+                response = self.session.post(self.endpoint_url, json=params, timeout=DEFAULT_TIMEOUT_TIME)
+                response.raise_for_status()
+                response_data = response.json()
+                return self._parse_response(response_data)
+            except requests.exceptions.RequestException as e:
+                error_msg = f"API request failed: {e}"
+                if "timeout" in str(e).lower() or "connection" in str(e).lower():
                     if attempt < max_retries - 1:
-                        logging.warning(f"Network error: {str(e)}, retrying in {retry_delay}s...")
-                        print(f"Network error: {str(e)}, retrying in {retry_delay}s...")
+                        logging.warning(f"Network error ({error_msg}), retrying in {retry_delay}s...")
                         time.sleep(retry_delay)
                     else:
-                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
-                        print(f"API request failed after {max_retries} attempts: {str(e)}")
-                        logging.error(error_msg)
-                        return "", 0, error_msg
-                elif "NoneType" in str_e:
-                    if attempt < max_retries - 1:
-                        logging.warning(f"Error: Did not receive response object, retrying in {retry_delay}s...")
-                        print(f"Network error: {str(e)}, retrying in {retry_delay}s...")
-                        time.sleep(retry_delay)
-                    else:
-                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
-                        print(f"API request failed after {max_retries} attempts: {str(e)}")
-                        logging.error(error_msg)
-                        return "", 0, error_msg
+                        final_error = f"API request failed after {max_retries} attempts: {e}"
+                        logging.error(final_error)
+                        return "", 0, final_error
                 else:
-                    error_msg = f"OpenAI API error: {str(e)}"
-                    print(f"OpenAI API error: {str(e)}")
-                    logging.error(error_msg)
-                    return "", 0, error_msg
-
-    def generate_stream(self, **kwargs) -> tuple[str, int, str]:
-        """Generate streaming response.
+                    logging.error(f"{error_msg}. Response: {response.text if 'response' in locals() else 'N/A'}")
+                    return "", 0, f"{error_msg}"
+            except Exception as e:
+                error_msg = f"An unexpected error occurred: {e}"
+                if "Empty response received" in str(e):
+                     if attempt < max_retries - 1:
+                        logging.warning(f"Empty response received, retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                        continue
+                logging.error(error_msg, exc_info=True)
+                return "", 0, error_msg
         
-        Supports both collected (returns final result) and streaming modes.
-        When collect=True, returns format same as non-streaming, otherwise returns stream object.
+        return "", 0, f"API request failed after {max_retries} retries."
+
+    def generate_stream(self, **kwargs) -> tuple[Any, int, str]:
+        """
+        Generate a streaming response from the model.
         
         Args:
-            **kwargs: Keyword arguments including system_prompt, user_prompt, collect, etc.
+            **kwargs: Keyword arguments for the generation request.
             
         Returns:
-            Tuple containing (response_text, status_code, error_message).
+            If collect=False, returns a stream iterator. 
+            If collect=True, returns a tuple of (response_text, token_count, error_message).
         """
         messages = self._prepare_messages(**kwargs)
         params = self._prepare_params_for_responses_endpoint(messages, **kwargs)
         params["stream"] = True
-
-        complete_response = ""
-        reasoning_content = ""
-        estimated_tokens = 0
-
-        max_retries = 3
-        retry_delay = 10
-
+        
         collect_stream_answer = kwargs.get('collect', True)
+        params.pop('collect', None)
 
-        # Remove collect
-        if 'collect' in params:
-            del params['collect']
+        try:
+            response = self.session.post(self.endpoint_url, json=params, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
+            response.raise_for_status()
+            stream = OpenAIStreamWrapper(response)
 
-        for attempt in range(max_retries):
-            try:
-                stream = self.client.responses.create(**params)
+            if not collect_stream_answer:
+                return stream, 0, None
+            else:
+                return self._parse_streaming_response(stream)
 
-                if not collect_stream_answer:
-                    # return the whole stream if not collecting
-                    return stream, 0, None
-                else:
-                    for chunk in stream:
-                        last_chunk = chunk
-                        if chunk.type == 'response.reasoning_summary_text.delta':
-                            if chunk.delta:
-                                reasoning_content += chunk.delta
-                        elif chunk.type == 'response.output_text.delta':
-                            if chunk.delta:
-                                complete_response += chunk.delta
-                        else:
-                            # print(chunk)
-                            continue
-                    
-                    tokens = 0
-                    if hasattr(last_chunk, 'response'):
-                        if hasattr(last_chunk.response, 'usage'):
-                            if hasattr(last_chunk.response.usage, 'total_tokens'):
-                                tokens = last_chunk.response.usage.total_tokens
+        except requests.exceptions.RequestException as e:
+            error_msg = f"API stream request failed: {e}"
+            logging.error(error_msg)
+            return "", 0, error_msg
+        except Exception as e:
+            error_msg = f"An unexpected error occurred during streaming: {e}"
+            logging.error(error_msg, exc_info=True)
+            return "", 0, error_msg
 
-                    # Add reasoning content into response
-                    if reasoning_content:
-                        complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
-
-                    return complete_response, tokens, None
-
-            except Exception as e:
-                str_e = str(e).lower()
-                if "timeout" in str_e or "connection error" in str_e:
-                    if attempt < max_retries - 1:
-                        logging.warning(f"Network error: {str(e)}, retrying in {retry_delay}s...")
-                        time.sleep(retry_delay)
-                    else:
-                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
-                        logging.error(error_msg)
-                        return complete_response, int(estimated_tokens), error_msg
-                else:
-                    error_msg = f"OpenAI API error: {str(e)}"
-                    logging.error(error_msg)
-                    print(error_msg)
-                    return complete_response, int(estimated_tokens), error_msg
-
-    def _parse_response(self, response: Response) -> tuple[str, int, str]:
-        """Parse OpenAI API response.
+    def _parse_response(self, response_data: dict) -> tuple[str, int, str]:
+        """
+        Parse a non-streaming API response dictionary from a /responses endpoint.
         
         Args:
-            response: Response response object from OpenAI API.
+            response_data: The JSON response from the API as a dictionary.
             
         Returns:
-            Tuple containing (response_text, token_count, error_message).
+            A tuple containing (response_text, token_count, error_message).
         """
-        if len(response.output) > 1:
-            # reasoning models
-            complete_response = response.output[1].content[0].text
-        else:
-            # non-reasoning models
-            complete_response = response.output[0].content[0].text
+        try:
+            output = response_data.get('output', [])
+            if len(output) > 1:
+                # Assumes reasoning models have text in the second output element
+                complete_response = output[1].get('content', [{}])[0].get('text', '')
+            else:
+                complete_response = output[0].get('content', [{}])[0].get('text', '')
+            
+            reasoning_content = ""
+            if output and 'summary' in output[0]:
+                summary_texts = []
+                for item in output[0]['summary']:
+                    if 'summary' in item and item['summary']:
+                        summary_texts.extend([s.get('text', '') for s in item['summary'] if 'text' in s])
+                reasoning_content = "\n".join(summary_texts)
+
+            if reasoning_content:
+                complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
+
+            if not complete_response or not complete_response.strip():
+                raise ValueError("Empty response content received from API")
+            
+            tokens = response_data.get('usage', {}).get('total_tokens', 0)
+            return complete_response, tokens, None
+
+        except (KeyError, IndexError, ValueError) as e:
+            error_msg = f"Failed to parse API response: {e}. Data: {response_data}"
+            logging.error(error_msg)
+            return "", 0, error_msg
+
+    def _parse_streaming_response(self, stream: Iterator[types.SimpleNamespace]) -> tuple[str, int, str]:
+        """
+        Parse a streaming API response from a /responses endpoint by consuming the stream iterator.
         
-        reasoning_content = None
+        Args:
+            stream: An iterator that yields structured chunk objects.
+            
+        Returns:
+            A tuple containing (final_response_text, token_count, error_message).
+        """
+        complete_response = ""
+        reasoning_content = ""
+        tokens = 0
+        last_chunk = None
         
-        # Get reasoning content for OpenAI
-        if hasattr(response, 'output'):
-            if hasattr(response.output[0], "summary"):
-                for item in response.output[0].summary:
-                    if hasattr(item, 'summary') and item.summary:
-                        reasoning_content += "\n".join([s.text for s in item if hasattr(s, 'text')])
-        
-        # Add reasoning content to complete response
-        if reasoning_content:
-            complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
-        
-        return (
-            complete_response,
-            response.usage.total_tokens if response.usage else 0,
-            None
-        )
+        try:
+            for chunk in stream:
+                last_chunk = chunk
+                if chunk.type == 'response.reasoning_summary_text.delta' and hasattr(chunk, 'delta'):
+                    reasoning_content += chunk.delta
+                elif chunk.type =='response.reasoning_summary_part.done':
+                    reasoning_content += '\n\n'
+                elif chunk.type == 'response.output_text.delta' and hasattr(chunk, 'delta'):
+                    complete_response += chunk.delta
+                # else:
+                #     print(chunk)
+            
+            if last_chunk and hasattr(last_chunk, 'response') and hasattr(last_chunk.response, 'usage'):
+                tokens = last_chunk.response.usage.total_tokens or 0
+
+            if reasoning_content:
+                complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
+
+            if not complete_response or not complete_response.strip():
+                raise ValueError("Empty response received from streaming API")
+
+            return complete_response, tokens, None
+
+        except Exception as e:
+            error_msg = f"Failed to process stream: {e}"
+            logging.error(error_msg, exc_info=True)
+            return "", 0, error_msg
 
 
 class OpenAICompatibleModel(BaseModel):
-    """OpenAI-compatible model handler.
-    This uses OpenAI /chat/completions endpoint. Specify model_provider!="openai" for this method.
-    NOTE: Most third-party provider ONLY support this endpoint.
+    """
+    OpenAI-compatible handler.
+    This uses an endpoint compatible with the OpenAI /chat/completions API. 
+    Specify model_provider!="openai" for this method.
+    NOTE: Most third-party providers ONLY support this endpoint.
     You CANNOT get reasoning content for OpenAI Models from this endpoint.
-    
-    Handles text and multimodal interactions with OpenAI-compatible APIs
-    including Alibaba Cloud, Volcengine, and other compatible providers.
     """
 
     def __init__(self, credentials: Dict) -> None:
-        """Initialize OpenAI model with credentials.
+        """
+        Initialize the model handler with credentials.
         
         Args:
             credentials: Dictionary containing API credentials and configuration.
+                         Expected keys: 'api_key', 'base_url'.
         """
         super().__init__(credentials)
-        self.client = OpenAI(
-            api_key=credentials.get('api_key', ''),
-            base_url=credentials.get('base_url', 'https://api.openai.com/v1')
-        )
+        api_key = credentials.get('api_key')
+        base_url = credentials.get('base_url')
+        
+        if base_url.endswith('/'):
+            base_url = base_url[:-1]
+        endpoint_url = f"{base_url}/chat/completions"
+
+        if not api_key or not base_url:
+            raise ValueError("Credentials must include 'api_key' and 'base_url'.")
+
+        self.endpoint_url = endpoint_url
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        })
 
     def _encode_image(self, image_path: str) -> str:
-        """Encode image to base64 string in OpenAI API format.
+        """
+        Encode image to a base64 data URL.
         
         Args:
             image_path: Path to the image file.
             
         Returns:
-            Base64 encoded string with data URL format for OpenAI API.
+            Base64 encoded data URL string.
         """
         with open(image_path, "rb") as img_file:
             base64_str = base64.b64encode(img_file.read()).decode('utf-8')
-            img_format = img_file.name.split('.')[-1]
-            result_str = f"data:image/{img_format};base64,{base64_str}"
-            return result_str
+            img_format = image_path.split('.')[-1]
+            return f"data:image/{img_format};base64,{base64_str}"
 
     def _prepare_messages(self, **kwargs) -> list:
-        """Prepare message format for OpenAI API calls.
-        
-        Handles both text-only and multimodal (text + images) requests.
+        """
+        Prepare the message structure for the API call.
         
         Args:
             **kwargs: Keyword arguments containing system_prompt, user_prompt, and optional files.
             
         Returns:
-            List of message dictionaries formatted for OpenAI API.
+            A list of message dictionaries formatted for the API.
         """
         messages = [{"role": "system", "content": kwargs['system_prompt']}]
         if kwargs.get('files'):
-            # Handle multimodal requests
             messages.append({
                 "role": "user",
                 "content": [
                     {"type": "text", "text": kwargs['user_prompt']},
-                    *[{"type": "image_url", "image_url": {"url": f"{self._encode_image(f)}"}} for f in kwargs['files']]
+                    *[{"type": "image_url", "image_url": {"url": self._encode_image(f)}} for f in kwargs['files']]
                 ]
             })
         else:
@@ -556,192 +673,211 @@ class OpenAICompatibleModel(BaseModel):
         return messages
 
     def _prepare_params_for_completions_endpoint(self, messages, **kwargs) -> dict:
-        """Prepare API parameters for OpenAI API calls. This is for the /chat/completions endpoint.
-        
-        Handles model-specific configurations and filters out None values.
+        """
+        Prepare the final dictionary of parameters for the API call.
         
         Args:
             messages: List of message dictionaries.
             **kwargs: Additional parameters like temperature, max_tokens, etc.
             
         Returns:
-            Dictionary of API parameters with None values filtered out.
+            A dictionary of API parameters with irrelevant keys removed and None values filtered out.
         """
-        keys_to_remove = ["model_provider", "model_name", "system_prompt", "user_prompt", "stream", 
-                          "skip_model_checking", "config_path", "custom_config"]
+        keys_to_remove = ["model_provider", "model_name", "system_prompt", "user_prompt",
+                          "skip_model_checking", "config_path", "custom_config", "endpoint_url"]
         params = {
             "model": self.credentials.get('model_name', 'gpt-5'),
             "messages": messages,
             **kwargs
         }
-        # remove keys in keys_to_remove
         for key in keys_to_remove:
-            try:
-                del params[key]
-            except:
-                pass
-        # only return params not None
+            params.pop(key, None)
         return {k: v for k, v in params.items() if v is not None}
 
     def generate(self, **kwargs) -> tuple[str, int, str]:
-        """Generate non-streaming response.
+        """
+        Generate a non-streaming response from the model.
         
         Args:
-            **kwargs: Keyword arguments including system_prompt, user_prompt, etc.
+            **kwargs: Keyword arguments for the generation request.
             
         Returns:
-            Tuple containing (response_text, status_code, error_message).
+            A tuple containing (response_text, token_count, error_message).
         """
         messages = self._prepare_messages(**kwargs)
         params = self._prepare_params_for_completions_endpoint(messages, **kwargs)
-        # Remove collect
-        if 'collect' in params:
-            del params['collect']
+        params.pop('stream', None)
+        params.pop('collect', None)
 
         max_retries = 3
         retry_delay = 10
         for attempt in range(max_retries):
             try:
-                response = self.client.chat.completions.create(**params)
-                return self._parse_response(response)
-            except Exception as e:
-                str_e = str(e).lower()
-                if "timeout" in str_e or "connection error" in str_e:
+                response = self.session.post(self.endpoint_url, json=params, timeout=DEFAULT_TIMEOUT_TIME)
+                response.raise_for_status()
+                response_data = response.json()
+                return self._parse_response(response_data)
+            except requests.exceptions.RequestException as e:
+                error_msg = f"API request failed: {e}"
+                if "timeout" in str(e).lower() or "connection" in str(e).lower():
                     if attempt < max_retries - 1:
-                        logging.warning(f"Network error: {str(e)}, retrying in {retry_delay}s...")
-                        print(f"Network error: {str(e)}, retrying in {retry_delay}s...")
+                        logging.warning(f"Network error ({error_msg}), retrying in {retry_delay}s...")
                         time.sleep(retry_delay)
                     else:
-                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
-                        print(f"API request failed after {max_retries} attempts: {str(e)}")
-                        logging.error(error_msg)
-                        return "", 0, error_msg
-                elif "NoneType" in str_e:
-                    if attempt < max_retries - 1:
-                        logging.warning(f"Error: Did not receive response object, retrying in {retry_delay}s...")
-                        print(f"Network error: {str(e)}, retrying in {retry_delay}s...")
-                        time.sleep(retry_delay)
-                    else:
-                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
-                        print(f"API request failed after {max_retries} attempts: {str(e)}")
-                        logging.error(error_msg)
-                        return "", 0, error_msg
+                        final_error = f"API request failed after {max_retries} attempts: {e}"
+                        logging.error(final_error)
+                        return "", 0, final_error
                 else:
-                    error_msg = f"OpenAI API error: {str(e)}"
-                    print(f"OpenAI API error: {str(e)}")
-                    logging.error(error_msg)
-                    return "", 0, error_msg
-
-    def generate_stream(self, **kwargs) -> tuple[str, int, str]:
-        """Generate streaming response.
+                    logging.error(f"{error_msg}. Response: {response.text if 'response' in locals() else 'N/A'}")
+                    return "", 0, f"{error_msg}"
+            except Exception as e:
+                error_msg = f"An unexpected error occurred: {e}"
+                logging.error(error_msg, exc_info=True)
+                return "", 0, error_msg
         
-        Supports both collected (returns final result) and streaming modes.
-        When collect=True, returns format same as non-streaming, otherwise returns stream object.
+        return "", 0, f"API request failed after {max_retries} retries."
+
+
+    def generate_stream(self, **kwargs) -> tuple[Any, int, str]:
+        """
+        Generate a streaming response from the model.
         
         Args:
-            **kwargs: Keyword arguments including system_prompt, user_prompt, collect, etc.
+            **kwargs: Keyword arguments for the generation request.
             
         Returns:
-            Tuple containing (response_text, status_code, error_message).
+            If collect=False, returns a stream iterator. 
+            If collect=True, returns a tuple of (response_text, token_count, error_message).
         """
         messages = self._prepare_messages(**kwargs)
         params = self._prepare_params_for_completions_endpoint(messages, **kwargs)
         params["stream"] = True
-
-        complete_response = ""
-        reasoning_content = ""
-        estimated_tokens = 0
-
-        max_retries = 3
-        retry_delay = 10
-
+        
         collect_stream_answer = kwargs.get('collect', True)
+        params.pop('collect', None)
 
-        # Remove collect
-        if 'collect' in params:
-            del params['collect']
+        try:
+            response = self.session.post(self.endpoint_url, json=params, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
+            response.raise_for_status()
+            stream = OpenAIStreamWrapper(response)
 
-        for attempt in range(max_retries):
-            try:
-                stream = self.client.chat.completions.create(**params)
+            if not collect_stream_answer:
+                return stream, 0, None
+            else:
+                return self._parse_streaming_response(stream)
 
-                if not collect_stream_answer:
-                    # Directly return the stream if collect==False
-                    return stream, 0, None
-                else:
-                    returned_tokens = None
-                    for chunk in stream:
-                        # print(chunk)
-                        if chunk.choices and len(chunk.choices) > 0:
-                            delta = chunk.choices[0].delta
+        except requests.exceptions.RequestException as e:
+            error_msg = f"API stream request failed: {e}"
+            logging.error(error_msg)
+            return "", 0, error_msg
+        except Exception as e:
+            error_msg = f"An unexpected error occurred during streaming: {e}"
+            logging.error(error_msg, exc_info=True)
+            return "", 0, error_msg
 
-                            # Parse content
-                            if hasattr(delta, 'content') and delta.content is not None:
-                                content = delta.content
-                                complete_response += content
-
-                            # Parse reasoning_content
-                            if hasattr(delta, 'reasoning_content') and delta.reasoning_content is not None:
-                                reasoning_content += delta.reasoning_content
-                        
-                        if hasattr(chunk, 'usage') and hasattr(chunk.usage, 'total_tokens'):
-                            returned_tokens = chunk.usage.total_tokens
-
-                    if returned_tokens:
-                        tokens = returned_tokens
-                    else:
-                        tokens = 0
-
-                    # Add reasoning_content into response
-                    if reasoning_content:
-                        complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
-
-                    return complete_response, tokens, None
-
-            except Exception as e:
-                str_e = str(e).lower()
-                if "timeout" in str_e or "connection error" in str_e:
-                    if attempt < max_retries - 1:
-                        logging.warning(f"Network error: {str(e)}, retrying in {retry_delay}s...")
-                        time.sleep(retry_delay)
-                    else:
-                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
-                        logging.error(error_msg)
-                        return complete_response, int(estimated_tokens), error_msg
-                else:
-                    error_msg = f"OpenAI API error: {str(e)}"
-                    logging.error(error_msg)
-                    print(error_msg)
-                    return complete_response, int(estimated_tokens), error_msg
-
-    def _parse_response(self, response: ChatCompletion) -> tuple[str, int, str]:
-        """Parse OpenAI API response.
+    def _parse_response(self, response_data: dict) -> tuple[str, int, str]:
+        """
+        Parse a non-streaming API response dictionary.
         
         Args:
-            response: ChatCompletion response object from OpenAI API.
+            response_data: The JSON response from the API as a dictionary.
             
         Returns:
-            Tuple containing (response_text, token_count, error_message).
+            A tuple containing (response_text, token_count, error_message).
         """
-        complete_response = response.choices[0].message.content
-        if hasattr(response.choices[0].message, 'reasoning_content'):
-            complete_response = "<think>\n" + str(response.choices[0].message.reasoning_content) + "\n</think>\n\n" + \
-                                response.choices[0].message.content
-        return (
-            complete_response,
-            response.usage.total_tokens if response.usage else 0,
-            None
-        )
+        try:
+            message = response_data['choices'][0]['message']
+            complete_response = message.get('content', '') or ''
+            
+            if 'reasoning_content' in message and message['reasoning_content']:
+                complete_response = f"<think>\n{message['reasoning_content']}\n</think>\n\n{complete_response}"
+            
+            if not complete_response.strip():
+                raise ValueError("Empty response content received from API")
+            
+            tokens = response_data.get('usage', {}).get('total_tokens', 0)
+            return complete_response, tokens, None
+        
+        except (KeyError, IndexError, ValueError) as e:
+            error_msg = f"Failed to parse API response: {e}. Data: {response_data}"
+            logging.error(error_msg)
+            return "", 0, error_msg
+
+    def _parse_streaming_response(self, stream: Iterator[types.SimpleNamespace]) -> tuple[str, int, str]:
+        """
+        Parse a streaming API response by consuming the stream iterator.
+        
+        Args:
+            stream: An iterator that yields structured chunk objects.
+            
+        Returns:
+            A tuple containing (final_response_text, token_count, error_message).
+        """
+        complete_response = ""
+        reasoning_content = ""
+        returned_tokens = 0
+        
+        try:
+            for chunk in stream:
+                if hasattr(chunk, 'choices') and chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if hasattr(delta, 'content') and delta.content is not None:
+                        complete_response += delta.content
+                    if hasattr(delta, 'reasoning_content') and delta.reasoning_content is not None:
+                        reasoning_content += delta.reasoning_content
+                
+                if hasattr(chunk, 'usage') and hasattr(chunk.usage, 'total_tokens') and chunk.usage.total_tokens is not None:
+                    returned_tokens = chunk.usage.total_tokens
+
+            if reasoning_content:
+                complete_response = f"<think>\n{reasoning_content}\n</think>\n\n{complete_response}"
+
+            if not complete_response.strip():
+                raise ValueError("Empty response received from streaming API")
+
+            return complete_response, returned_tokens, None
+        
+        except Exception as e:
+            error_msg = f"Failed to process stream: {e}"
+            logging.error(error_msg, exc_info=True)
+            return "", 0, error_msg
 
 
 class OllamaModel(BaseModel):
-    """Ollama local model handler.
+    """
+    Ollama local model handler.
     
     Handles interactions with locally hosted Ollama models including multimodal support.
     """
 
+    def __init__(self, credentials: Dict) -> None:
+        """
+        Initialize the model handler with credentials.
+        
+        Args:
+            credentials: Dictionary containing API credentials and configuration.
+                         Expected keys: 'api_key'(placeholder, not used), 'base_url(e.g., 'http://localhost:11434')'.
+        """
+        super().__init__(credentials)
+        api_key = None
+        base_url = credentials.get('base_url')
+        
+        if base_url.endswith('/'):
+            base_url = base_url[:-1]
+        endpoint_url = f"{base_url}/api/chat"
+
+        if not api_key or not base_url:
+            raise ValueError("Credentials must include 'api_key' and 'base_url'.")
+
+        self.endpoint_url = endpoint_url
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Content-Type": "application/json",
+        })
+
     def _encode_image(self, image_path: str) -> str:
-        """Encode image to base64 string for Ollama API.
+        """
+        Encode image to a base64 string for the Ollama API.
         
         Args:
             image_path: Path to the image file.
@@ -752,148 +888,159 @@ class OllamaModel(BaseModel):
         with open(image_path, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode('utf-8')
 
-    def generate(self, **kwargs) -> tuple[str, int, str]:
-        """Generate non-streaming response from Ollama model.
+    def _prepare_payload(self, **kwargs) -> Dict[str, Any]:
+        """
+        Prepare the JSON payload for an Ollama API request.
         
         Args:
-            **kwargs: Keyword arguments including system_prompt, user_prompt, etc.
+            **kwargs: Keyword arguments containing prompts, images, and options.
             
         Returns:
-            Tuple containing (response_text, status_code, error_message).
+            A dictionary representing the request payload.
         """
-        # Construct messages
-        messages = [{"role": "system", "content": kwargs.get('system_prompt')}]
-        user_prompt_content = kwargs.get('user_prompt')
+        messages = [{"role": "system", "content": kwargs.get('system_prompt', '')}]
+        user_message = {"role": "user", "content": kwargs.get('user_prompt', '')}
 
         if kwargs.get('files'):
-            image_encoded = [self._encode_image(f) for f in kwargs['files']]
-            # Handle multimodal requests
-            messages.append({
-                "role": "user",
-                "content": user_prompt_content,
-                "images": kwargs['files'],
-            })
-        else:
-            messages.append({"role": "user", "content": user_prompt_content})
+            user_message["images"] = [self._encode_image(f) for f in kwargs['files']]
+        
+        messages.append(user_message)
 
         options = {
             "temperature": kwargs.get('temperature'),
             "num_predict": kwargs.get('max_tokens')
         }
-
-        # Remove None values
         options = {k: v for k, v in options.items() if v is not None}
 
-        try:
-            response = ollama.chat(
-                model=self.credentials.get('model_name', 'llama3.1:8b'),
-                messages=messages,
-                options=options,
-            )
-            return self._parse_response(response)
-        except Exception as e:
-            logging.error(f"Ollama API error: {str(e)}")
-            print(f"Ollama API error: {str(e)}")
-            return "", 0, str(e)
+        payload = {
+            "model": self.credentials.get('model_name', 'llama3.1:8b'),
+            "messages": messages,
+            "options": options,
+        }
+        return payload
 
-    def generate_stream(self, **kwargs) -> tuple[str, int, str]:
-        """Generate streaming response from Ollama model.
-        
-        Supports both collected (returns final result) and streaming modes.
-        When collect=True, returns format same as non-streaming, otherwise returns stream object.
+    def generate(self, **kwargs) -> tuple[str, int, str]:
+        """
+        Generate a non-streaming response from the Ollama model.
         
         Args:
-            **kwargs: Keyword arguments including system_prompt, user_prompt, collect, etc.
+            **kwargs: Keyword arguments for the generation request.
             
         Returns:
-            Tuple containing (response_text, status_code, error_message).
+            A tuple containing (response_text, token_count, error_message).
         """
-        # Construct messages
-        messages = [{"role": "system", "content": kwargs.get('system_prompt')}]
+        payload = self._prepare_payload(**kwargs)
 
-        if kwargs.get('files'):
-            image_encoded = [self._encode_image(f) for f in kwargs['files']]
-            # Handle multimodal requests
-            messages.append({
-                "role": "user",
-                "content": kwargs.get('user_prompt'),
-                "images": kwargs['files'],
-            })
-        else:
-            messages.append({"role": "user", "content": kwargs.get('user_prompt')})
+        try:
+            response = self.session.post(self.endpoint_url, json=payload, timeout=DEFAULT_TIMEOUT_TIME)
+            response.raise_for_status()
+            response_data = response.json()
+            return self._parse_response(response_data)
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Ollama API request failed: {e}"
+            logging.error(f"{error_msg}. Response: {response.text if 'response' in locals() else 'N/A'}")
+            return "", 0, str(e)
+        except Exception as e:
+            error_msg = f"An unexpected error occurred: {e}"
+            logging.error(error_msg, exc_info=True)
+            return "", 0, str(e)
 
-        options = {
-            "temperature": kwargs.get('temperature'),
-            "num_predict": kwargs.get('max_tokens'),
-        }
-
-        # Remove None values
-        options = {k: v for k, v in options.items() if v is not None}
-
-        complete_response = ""
-        estimated_tokens = 0
-
-        max_retries = 3
-        retry_delay = 10
+    def generate_stream(self, **kwargs) -> tuple[Any, int, str]:
+        """
+        Generate a streaming response from the Ollama model.
+        
+        Args:
+            **kwargs: Keyword arguments for the generation request.
+            
+        Returns:
+            If collect=False, returns a stream iterator.
+            If collect=True, returns a tuple of (response_text, token_count, error_message).
+        """
+        payload = self._prepare_payload(**kwargs)
+        payload['stream'] = True
 
         collect_stream_answer = kwargs.get('collect', True)
 
-        # Remove collect parameter to avoid Ollama API error
-        if 'collect' in kwargs:
-            del kwargs['collect']
+        try:
+            response = self.session.post(self.endpoint_url, json=payload, stream=True, timeout=300)
+            response.raise_for_status()
+            stream = OllamaStreamWrapper(response)
 
-        for attempt in range(max_retries):
-            try:
-                stream = ollama.chat(
-                    model=self.credentials.get('model_name', 'llama3.1:8b'),
-                    messages=messages,
-                    options=options,
-                    stream=True,
-                )
+            if not collect_stream_answer:
+                return stream, 0, None
+            else:
+                return self._parse_streaming_response(stream)
 
-                if not collect_stream_answer:
-                    # If not collecting stream results, return stream object directly
-                    return stream, 0, None
-                else:
-                    # Collect streaming results
-                    for chunk in stream:
-                        if hasattr(chunk, 'message') and chunk.message and hasattr(chunk.message, 'content'):
-                            content = chunk.message.content
-                            complete_response += content
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Ollama API stream request failed: {e}"
+            logging.error(error_msg)
+            return "", 0, str(e)
+        except Exception as e:
+            error_msg = f"An unexpected error occurred during streaming: {e}"
+            logging.error(error_msg, exc_info=True)
+            return "", 0, str(e)
 
-                    # Note: streaming calls don't support precise token consumption statistics
-                    tokens = 0
-                    if hasattr(stream, 'eval_count') and hasattr(stream, 'prompt_eval_count'):
-                        tokens = stream.eval_count + stream.prompt_eval_count
+    def _parse_response(self, response_data: Dict[str, Any]) -> tuple[str, int, str]:
+        """
+        Parse a non-streaming API response dictionary from the Ollama API.
+        
+        Args:
+            response_data: The JSON response from the API as a dictionary.
+            
+        Returns:
+            A tuple containing (response_text, token_count, error_message).
+        """
+        try:
+            complete_response = response_data.get('message', {}).get('content', '')
+            if not complete_response or not complete_response.strip():
+                raise ValueError("Empty response content received from API")
+            
+            prompt_tokens = response_data.get('prompt_eval_count', 0)
+            eval_tokens = response_data.get('eval_count', 0)
+            tokens_used = prompt_tokens + eval_tokens
+            
+            return complete_response, tokens_used, None
+        
+        except (ValueError, KeyError) as e:
+            error_msg = f"Failed to parse API response: {e}. Data: {response_data}"
+            logging.error(error_msg)
+            return "", 0, error_msg
 
-                    return complete_response, tokens, None
-
-            except Exception as e:
-                str_e = str(e).lower()
-                if "timeout" in str_e or "connection error" in str_e:
-                    if attempt < max_retries - 1:
-                        logging.warning(f"Network error: {str(e)}, retrying in {retry_delay}s...")
-                        print(f"Network error: {str(e)}, retrying in {retry_delay}s...")
-                        time.sleep(retry_delay)
-                    else:
-                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
-                        print(f"API request failed after {max_retries} attempts: {str(e)}")
-                        logging.error(error_msg)
-                        return complete_response, int(estimated_tokens), error_msg
-                else:
-                    error_msg = f"Ollama API error: {str(e)}"
-                    print(f"Ollama API error: {str(e)}")
-                    logging.error(error_msg)
-                    return complete_response, int(estimated_tokens), error_msg
-
-    def _parse_response(self, response) -> tuple[str, int, str]:
-        tokens_used = response.eval_count + response.prompt_eval_count
-        complete_response = response.message.content
-        return (
-            complete_response,
-            tokens_used,
-            None
-        )
+    def _parse_streaming_response(self, stream: Iterator[types.SimpleNamespace]) -> tuple[str, int, str]:
+        """
+        Parse a streaming API response by consuming the stream iterator.
+        
+        Args:
+            stream: An iterator that yields structured chunk objects.
+            
+        Returns:
+            A tuple containing (final_response_text, token_count, error_message).
+        """
+        complete_response = ""
+        final_chunk = None
+        
+        try:
+            for chunk in stream:
+                if hasattr(chunk, 'message') and hasattr(chunk.message, 'content'):
+                    complete_response += chunk.message.content
+                if hasattr(chunk, 'done') and chunk.done:
+                    final_chunk = chunk
+            
+            if not complete_response or not complete_response.strip():
+                raise ValueError("Empty response received from streaming API")
+            
+            tokens = 0
+            if final_chunk:
+                prompt_tokens = getattr(final_chunk, 'prompt_eval_count', 0)
+                eval_tokens = getattr(final_chunk, 'eval_count', 0)
+                tokens = prompt_tokens + eval_tokens
+                
+            return complete_response, tokens, None
+            
+        except Exception as e:
+            error_msg = f"Failed to process stream: {e}"
+            logging.error(error_msg, exc_info=True)
+            return "", 0, error_msg
 
 
 class BaseEmbeddingModel:
@@ -927,104 +1074,162 @@ class BaseEmbeddingModel:
 
 
 class OpenAIEmbeddingModel(BaseEmbeddingModel):
-    """OpenAI embedding model handler.
+    """
+    OpenAI embedding model handler.
     
-    Handles text embedding generation using OpenAI's embedding models.
-    Note: Only supports text embeddings, not multimodal embeddings.
+    Handles text embedding generation using OpenAI's embedding models
+    or other compatible endpoints.
+    NOTE: Now only supports text embeddings, not multimodal embeddings.
     """
     
     def __init__(self, credentials: Dict) -> None:
+        """
+        Initialize the model handler with credentials.
+        
+        Args:
+            credentials: Dictionary containing API credentials and configuration.
+                         Expected keys: 'api_key', 'base_url'.
+        """
         super().__init__(credentials)
-        self.client = OpenAI(
-            api_key=credentials.get('api_key'),
-            base_url=credentials.get('base_url')
-        )
+        api_key = credentials.get('api_key')
+        base_url = credentials.get('base_url')
+        
+        if base_url.endswith('/'):
+            base_url = base_url[:-1]
+        endpoint_url = f"{base_url}/embeddings"
+
+        if not api_key or not base_url:
+            raise ValueError("Credentials must include 'api_key' and 'base_url'.")
+
+        self.endpoint_url = endpoint_url
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        })
         
     def _encode_image(self, image_path: str) -> str:
-        """Encode image to base64 string in OpenAI API format.
+        """
+        Encode image to a base64 data URL.
         
         Args:
             image_path: Path to the image file.
             
         Returns:
-            Base64 encoded string with data URL format.
+            Base64 encoded data URL string.
         """
         with open(image_path, "rb") as img_file:
             base64_str = base64.b64encode(img_file.read()).decode('utf-8')
-            img_format = img_file.name.split('.')[-1]
-            result_str = f"data:image/{img_format};base64,{base64_str}"
-            return result_str
+            img_format = image_path.split('.')[-1]
+            return f"data:image/{img_format};base64,{base64_str}"
         
     def generate_embeddings(
             self,
             text: Union[str, List[str]],
             files: Optional[List[str]] = None
     ) -> tuple[List[List[float]], int, str]:
-        """Generate embedding vectors for text input.
+        """
+        Generate embedding vectors for text input.
         
-        Note: Only supports text embeddings, not multimodal embeddings.
+        Note: The 'files' parameter is not used as only text embeddings are supported.
         
         Args:
-            text: Single text string or list of text strings.
-            files: List of image file paths, optional (not supported by OpenAI).
+            text: A single text string or a list of text strings to be embedded.
+            files: An optional list of image file paths (not supported).
             
         Returns:
-            Tuple containing (embeddings, tokens_used, error_message).
+            A tuple containing (list_of_embeddings, tokens_used, error_message).
         """
         max_retries = 3
         retry_delay = 10
         
-        # Ensure text is in list format
         if isinstance(text, str):
             input_texts = [text]
         else:
             input_texts = text
-            
-        input_data = input_texts
+        
+        payload = {
+            "model": self.credentials.get('model_name'),
+            "input": input_texts,
+        }
             
         for attempt in range(max_retries):
             try:
-                response = self.client.embeddings.create(
-                    model=self.credentials.get('model_name'),
-                    input=input_data,
-                )
+                response = self.session.post(self.endpoint_url, json=payload, timeout=DEFAULT_TIMEOUT_TIME)
+                response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
                 
-                # 提取嵌入向量
-                embeddings = [data.embedding for data in response.data]
-                tokens_used = response.usage.total_tokens if hasattr(response, 'usage') else 0
+                response_data = response.json()
                 
+                # Extract embedding vectors and usage data
+                embeddings = [item['embedding'] for item in response_data.get('data', [])]
+                tokens_used = response_data.get('usage', {}).get('total_tokens', 0)
+                
+                if not embeddings:
+                    raise ValueError("API returned no embeddings in the 'data' field.")
+
                 return embeddings, tokens_used, None
                 
-            except Exception as e:
-                str_e = str(e).lower()
-                if "timeout" in str_e or "connection error" in str_e:
+            except requests.exceptions.RequestException as e:
+                # Handle network-related errors (timeout, connection error)
+                error_msg = f"API request failed: {e}"
+                if "timeout" in str(e).lower() or "connection" in str(e).lower():
                     if attempt < max_retries - 1:
-                        logging.warning(f"Network error: {str(e)}, retrying in {retry_delay}s...")
-                        print(f"Network error: {str(e)}, retrying in {retry_delay}s...")
+                        logging.warning(f"Network error ({error_msg}), retrying in {retry_delay}s...")
                         time.sleep(retry_delay)
                     else:
-                        error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
-                        print(f"API request failed after {max_retries} attempts: {str(e)}")
-                        logging.error(error_msg)
-                        return [], 0, error_msg
+                        final_error = f"API request failed after {max_retries} attempts: {e}"
+                        logging.error(final_error)
+                        return [], 0, final_error
                 else:
-                    error_msg = f"OpenAI Embedding API error: {str(e)}"
-                    print(f"OpenAI Embedding API error: {str(e)}")
-                    logging.error(error_msg)
-                    return [], 0, error_msg
+                    # Handle other request exceptions (e.g., HTTP 4xx/5xx errors)
+                    logging.error(f"{error_msg}. Response: {response.text if 'response' in locals() else 'N/A'}")
+                    return [], 0, f"{error_msg}"
+            
+            except (ValueError, KeyError) as e:
+                # Handle errors from parsing the response JSON
+                error_msg = f"Failed to parse API response: {e}"
+                logging.error(f"{error_msg}. Response data: {response.text if 'response' in locals() else 'N/A'}")
+                return [], 0, error_msg
+
+        # This line is reached only if all retries fail
+        return [], 0, f"API request failed after {max_retries} retries."
 
 
 class OllamaEmbeddingModel(BaseEmbeddingModel):
-    """Ollama embedding model handler.
+    """
+    Ollama embedding model handler.
     
     Handles text and multimodal embedding generation using Ollama models.
     """
     
     def __init__(self, credentials: Dict) -> None:
+        """
+        Initialize the model handler with credentials.
+        
+        Args:
+            credentials: Dictionary containing API credentials and configuration.
+                         Expected keys: 'api_key'(placeholder, not used), 'base_url(e.g., 'http://localhost:11434')'.
+        """
         super().__init__(credentials)
+        api_key = None
+        base_url = credentials.get('base_url')
+        
+        if base_url.endswith('/'):
+            base_url = base_url[:-1]
+        endpoint_url = f"{base_url}/api/embeddings"
+
+        if not api_key or not base_url:
+            raise ValueError("Credentials must include 'api_key' and 'base_url'.")
+
+        self.endpoint_url = endpoint_url
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Content-Type": "application/json",
+        })
         
     def _encode_image(self, image_path: str) -> str:
-        """Encode image to base64 string.
+        """
+        Encode image to a base64 string.
         
         Args:
             image_path: Path to the image file.
@@ -1040,19 +1245,19 @@ class OllamaEmbeddingModel(BaseEmbeddingModel):
             text: Union[str, List[str]],
             files: Optional[List[str]] = None
     ) -> tuple[List[List[float]], int, str]:
-        """Generate text or multimodal embedding vectors.
+        """
+        Generate text or multimodal embedding vectors.
         
         Args:
-            text: Single text string or list of text strings.
-            files: List of image file paths, optional.
+            text: A single text string or a list of text strings.
+            files: An optional list of image file paths for multimodal embeddings.
             
         Returns:
-            Tuple containing (embeddings, tokens_used, error_message).
+            A tuple containing (list_of_embeddings, tokens_used, error_message).
         """
         max_retries = 3
         retry_delay = 10
         
-        # Ensure text is in list format
         if isinstance(text, str):
             input_texts = [text]
         else:
@@ -1061,52 +1266,56 @@ class OllamaEmbeddingModel(BaseEmbeddingModel):
         all_embeddings = []
         total_tokens = 0
         
+        # Pre-encode images once if they are provided
+        encoded_images = [self._encode_image(f) for f in files] if files else None
+        
         for t in input_texts:
-            # Prepare request parameters
-            params = {
+            payload = {
                 "model": self.credentials.get('model_name', 'nomic-embed-text'),
                 "prompt": t,
             }
             
-            # Add images (if any)
-            if files:
-                params["images"] = files
+            if encoded_images:
+                payload["images"] = encoded_images
                 
             for attempt in range(max_retries):
                 try:
-                    # Call Ollama API to generate embedding vectors
-                    response = ollama.embeddings(**params)
+                    response = self.session.post(self.endpoint_url, json=payload, timeout=60)
+                    response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
                     
-                    # Extract embedding vectors
-                    if hasattr(response, 'embedding'):
-                        all_embeddings.append(response.embedding)
-                    else:
-                        all_embeddings.append(response)
-                        
-                    # Ollama may not provide token usage
-                    if hasattr(response, 'eval_count'):
-                        total_tokens += response.eval_count
-                        
-                    break  # Successfully obtained embedding vectors, exit retry loop
+                    response_data = response.json()
                     
-                except Exception as e:
-                    str_e = str(e).lower()
-                    if "timeout" in str_e or "connection error" in str_e:
+                    # Extract embedding vector and usage data
+                    if 'embedding' not in response_data:
+                        raise ValueError("API response did not contain an 'embedding' field.")
+                    
+                    all_embeddings.append(response_data['embedding'])
+                    total_tokens += response_data.get('eval_count', 0)
+                    
+                    break  # Success, exit the retry loop for this text
+                    
+                except requests.exceptions.RequestException as e:
+                    error_msg = f"API request failed for prompt '{t[:30]}...': {e}"
+                    if "timeout" in str(e).lower() or "connection" in str(e).lower():
                         if attempt < max_retries - 1:
-                            logging.warning(f"Network error: {str(e)}, retrying in {retry_delay}s...")
-                            print(f"Network error: {str(e)}, retrying in {retry_delay}s...")
+                            logging.warning(f"Network error ({error_msg}), retrying in {retry_delay}s...")
                             time.sleep(retry_delay)
                         else:
-                            error_msg = f"API request failed after {max_retries} attempts: {str(e)}"
-                            print(f"API request failed after {max_retries} attempts: {str(e)}")
-                            logging.error(error_msg)
-                            return [], 0, error_msg
+                            final_error = f"API request failed after {max_retries} attempts: {e}"
+                            logging.error(final_error)
+                            return [], 0, final_error
                     else:
-                        error_msg = f"Ollama Embedding API error: {str(e)}"
-                        print(f"Ollama Embedding API error: {str(e)}")
-                        logging.error(error_msg)
-                        return [], 0, error_msg
-        
+                        logging.error(f"{error_msg}. Response: {response.text if 'response' in locals() else 'N/A'}")
+                        return [], 0, str(error_msg)
+                
+                except (ValueError, KeyError) as e:
+                    error_msg = f"Failed to parse API response for prompt '{t[:30]}...': {e}"
+                    logging.error(f"{error_msg}. Response data: {response.text if 'response' in locals() else 'N/A'}")
+                    return [], 0, str(error_msg)
+            else:
+                # This block executes if the retry loop completes without a `break`
+                return [], 0, f"All retry attempts failed for a prompt."
+
         return all_embeddings, total_tokens, None
 
 
@@ -1145,7 +1354,7 @@ def call_language_model(
         config_path: Configuration file path, mutually exclusive with custom_config.
         custom_config: Custom configuration dict instead of file, mutually exclusive with config_path.
                       Must contain base_url and api_key fields. Overrides config_path when valid.
-        **kwargs: Any additional parameters will be passed directly to the underlying API call. For example, enable_thinking, thinking_effort, completion_tokens...
+        **kwargs: Any additional parameters will be passed directly to the underlying API call. For example, enable_thinking, reasoning_effort, max_output_tokens...
         
     Returns:
         Tuple containing (response_text, tokens_used, error_message).
@@ -1322,7 +1531,8 @@ def batch_call_language_model(
         **kwargs
 ) -> List[Dict]:
     """Batch parallel calling language model unified entry function.
-    
+    This is a wrap of real-time calling, not async batch calling (which will make you wait for hours before getting response),
+      so it will cost the same money as real-time calling.
     This mode does not support true streaming calls.
     
     Args:
@@ -1339,7 +1549,7 @@ def batch_call_language_model(
         custom_config: Custom configuration dict instead of file, mutually exclusive with config_path.
         output_file: Output JSONL file path, optional. If provided, saves all results to specified file.
         show_progress: Whether to show progress bar (default True).
-        **kwargs: Any additional parameters will be passed directly to the underlying API call. For example, enable_thinking, thinking_effort, completion_tokens...
+        **kwargs: Any additional parameters will be passed directly to the underlying API call. For example, enable_thinking, reasoning_effort, max_output_tokens...
         
     Returns:
         List of result dictionaries containing request_index, response_text, tokens_used, error_msg fields.
