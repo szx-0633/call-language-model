@@ -26,7 +26,7 @@ import yaml
 import requests
 from tqdm import tqdm
 
-# NOTE:不需要OpenAI和Ollama库，使用requests模拟，但是调用方法与官方库调用一致
+# NOTE:不需要OpenAI和Ollama库，使用requests直接与底层端点通信，但是后续使用方法与官方库调用一致
 
 # 配置文件格式：llm_config.yaml，需要放在检查本文件所在路径内或者指定其路径
 # 当前支持多种模型提供商，也可自行添加提供商和模型名称，但仅支持openai（包含openai官方接入点和兼容接入点）和ollama两种渠道调用模型
