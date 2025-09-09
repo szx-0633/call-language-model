@@ -5,6 +5,7 @@
 ### 0. Move call_language_model.py to the same directory as this file
 
 ```bash
+cd tests
 cp ../call_language_model.py ./call_language_model.py
 ```
 

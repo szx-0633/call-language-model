@@ -107,7 +107,7 @@ def test_multimodal_language_model_call():
     
     # This test requires an image file - will skip if not available
     import os
-    image_files = ['./tests/test_image.png', './tests/test_image.jpg', './tests/1.png', './tests/sample.png']
+    image_files = ['test_image.png', 'test_image.jpg', '1.png', 'sample.png']
     available_image = None
     
     for img_file in image_files:
