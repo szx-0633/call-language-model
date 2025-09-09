@@ -14,7 +14,7 @@
 - **自定义配置支持**：可通过代码直接配置而无需配置文件
 - **增强的错误处理**：内置重试机制、网络错误处理和详细的错误日志
 - **灵活的参数传递**：支持传递任意额外的API参数，包括推理强度、输出token限制等
-- 统一的调用接口，简化集成过程，直接返回结果和信息，免去记忆多种API格式的烦恼
+- **统一的调用接口**：简化集成过程，直接返回结果和信息，免去记忆多种API格式的烦恼
 
 ## 安装
 
@@ -24,7 +24,7 @@
 pip install pyyaml requests tqdm
 ```
 
-**注意**：本工具不依赖OpenAI或Ollama的Python库，而是直接使用requests库进行HTTP API调用，这样可以更好地控制请求过程和错误处理。
+**注意**：本工具不依赖OpenAI或Ollama的Python库，而是直接使用requests库进行HTTP API调用，但返回格式与官方库保持一致，方便集成。
 
 ## 快速开始
 
@@ -331,8 +331,8 @@ batch_results = batch_call_language_model(
 
 - `model_provider`: 模型提供商，如 "openai"（使用/responses端点）, "aliyun", "volcengine"（使用/chat/completions端点）, "ollama"
 - `model_name`: 模型名称，需在配置文件中定义（除非设置skip_model_checking=True）
-- `system_prompt`: 系统提示
-- `user_prompt`: 用户提示
+- `system_prompt`: 系统提示，默认为None
+- `user_prompt`: 用户提示，不可为空
 - `stream`: 是否流式调用（默认 False）
 - `collect`: 流式调用时是否收集结果（默认 True）。设为False时返回流对象，需自行处理
 - `temperature`: 温度参数，控制输出随机性（可选）
@@ -364,7 +364,7 @@ batch_results = batch_call_language_model(
 - `model_name`: 模型名称，需在配置文件中定义（除非设置skip_model_checking=True）
 - `requests`: 请求列表，每个元素为字典，包含system_prompt, user_prompt和可选的files字段
   - 格式: `[{"system_prompt": "...", "user_prompt": "...", "files": [...]}, ...]`
-- `max_workers`: 最大并行工作线程数（默认 5）
+- `max_workers`: 最大并行工作线程数（默认 4）
 - `stream`: 是否流式调用（默认 False），设为True时收集流式响应，不支持真正的流式调用
 - `temperature`: 温度参数，控制输出随机性（可选）
 - `max_tokens`: 最大生成 token 数（可选）

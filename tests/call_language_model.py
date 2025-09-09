@@ -1608,7 +1608,7 @@ def batch_call_language_model(
         model_provider: str,
         model_name: str,
         requests: List[Dict],
-        max_workers: int = 5,
+        max_workers: int = 4,
         stream: bool = False,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
@@ -1629,7 +1629,7 @@ def batch_call_language_model(
         model_name: Model name, note that some providers may include version numbers.
         requests: List of request dictionaries containing system_prompt, user_prompt and optional files field.
                  Format: [{"system_prompt": "...", "user_prompt": "...", "files": [...]}, ...]
-        max_workers: Maximum number of parallel worker threads (default 5).
+        max_workers: Maximum number of parallel worker threads (default 4).
         stream: Whether to use streaming mode (default False). When True, collects and returns streaming responses.
         temperature: Sampling temperature, optional.
         max_tokens: Maximum tokens to generate, optional.
