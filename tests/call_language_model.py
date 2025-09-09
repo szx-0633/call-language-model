@@ -7,7 +7,7 @@ and embedding models through OpenAI-compatible APIs and Ollama.
 
 @File    : call_language_model.py
 @Author  : Zhangxiao Shen
-@Date    : 2025/8/14
+@Date    : 2025/9/10
 @Description: Call language models and embedding models using OpenAI or Ollama APIs.
 """
 
@@ -18,17 +18,19 @@ import logging
 import os
 import time
 import types
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Union, Any, Iterator, Tuple
+from typing import Dict, List, Optional, Union, Any, Iterator
 
 import yaml
 import requests
 from tqdm import tqdm
 
-# NOTE:不需要OpenAI和Ollama库，使用requests模拟，但是调用方法与官方库调用一致
+# NOTE:不需要OpenAI和Ollama库，使用requests直接与底层端点通信，但是后续使用方法与官方库调用一致
 
 # 配置文件格式：llm_config.yaml，需要放在检查本文件所在路径内或者指定其路径
 # 当前支持多种模型提供商，也可自行添加提供商和模型名称，但仅支持openai（包含openai官方接入点和兼容接入点）和ollama两种渠道调用模型
+# 如果您使用第三方提供的OpenAI模型，请确保其支持/responses端点，否则应设置provider!="OpenAI"以使用兼容的/chat/completions端点
 # 支持流式调用，设置参数collect=True会将流式调用的结果收集后返回，False会将整个流返回
 # 流式调用时部分模型不支持统计token消耗
 # 使用大语言模型的入口函数为call_language_model
@@ -85,7 +87,7 @@ from tqdm import tqdm
 # Constants
 DEFAULT_CONFIG_PATH = './llm_config.yaml'
 DEFAULT_LOG_FILE = './model_api.log'
-DEFAULT_MAX_RETRIES = 3
+DEFAULT_MAX_RETRIES = 5
 DEFAULT_RETRY_DELAY = 10
 DEFAULT_TIMEOUT_TIME = 300
 
@@ -311,8 +313,8 @@ class BaseModel:
 
     def generate(
             self,
-            system_prompt: str,
-            user_prompt: str,
+            system_prompt: str = None,
+            user_prompt: str = None,
             temperature: Optional[float] = None,
             max_tokens: Optional[int] = None,
             files: Optional[List[str]] = None
@@ -322,7 +324,7 @@ class BaseModel:
         Args:
             system_prompt: System instruction for the model.
             user_prompt: User input text.
-            temperature: Sampling temperature (0.0 to 2.0).
+            temperature: Sampling temperature.
             max_tokens: Maximum tokens in response.
             files: List of file paths for multimodal input.
             
@@ -393,7 +395,12 @@ class OpenAIModel(BaseModel):
         Returns:
             A list of message dictionaries formatted for the API.
         """
-        messages = [{"role": "system", "content": kwargs['system_prompt']}]
+        messages = []
+        system_prompt = kwargs.get('system_prompt', None)
+        if system_prompt is not None:
+            messages.append({"role": "system", "content": system_prompt})
+        assert 'user_prompt' in kwargs, "Missing required fields: user_prompt is required and must not be None"
+        assert kwargs['user_prompt'] is not None, "Missing required fields: user_prompt is required and must not be None"
         if kwargs.get('files'):
             messages.append({
                 "role": "user",
@@ -445,8 +452,8 @@ class OpenAIModel(BaseModel):
         params = self._prepare_params_for_responses_endpoint(messages, **kwargs)
         params.pop('collect', None)
 
-        max_retries = 3
-        retry_delay = 10
+        max_retries = DEFAULT_MAX_RETRIES
+        retry_delay = DEFAULT_RETRY_DELAY
         for attempt in range(max_retries):
             try:
                 response = self.session.post(self.endpoint_url, json=params, timeout=DEFAULT_TIMEOUT_TIME)
@@ -492,28 +499,54 @@ class OpenAIModel(BaseModel):
         messages = self._prepare_messages(**kwargs)
         params = self._prepare_params_for_responses_endpoint(messages, **kwargs)
         params["stream"] = True
-        
+
         collect_stream_answer = kwargs.get('collect', True)
         params.pop('collect', None)
 
-        try:
-            response = self.session.post(self.endpoint_url, json=params, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
-            response.raise_for_status()
-            stream = OpenAIStreamWrapper(response)
-
-            if not collect_stream_answer:
+        # If not collecting, do a single attempt and return raw stream
+        if not collect_stream_answer:
+            try:
+                response = self.session.post(self.endpoint_url, json=params, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
+                response.raise_for_status()
+                stream = OpenAIStreamWrapper(response)
                 return stream, 0, None
-            else:
-                return self._parse_streaming_response(stream)
+            except requests.exceptions.RequestException as e:
+                error_msg = f"API stream request failed: {e}"
+                logging.error(error_msg)
+                return "", 0, error_msg
+            except Exception as e:
+                error_msg = f"An unexpected error occurred during streaming: {e}"
+                logging.error(error_msg, exc_info=True)
+                return "", 0, error_msg
 
-        except requests.exceptions.RequestException as e:
-            error_msg = f"API stream request failed: {e}"
-            logging.error(error_msg)
-            return "", 0, error_msg
-        except Exception as e:
-            error_msg = f"An unexpected error occurred during streaming: {e}"
-            logging.error(error_msg, exc_info=True)
-            return "", 0, error_msg
+        max_retries = DEFAULT_MAX_RETRIES
+        retry_delay = DEFAULT_RETRY_DELAY
+        for attempt in range(max_retries):
+            try:
+                response = self.session.post(self.endpoint_url, json=params, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
+                response.raise_for_status()
+                stream = OpenAIStreamWrapper(response)
+                return self._parse_streaming_response(stream)
+            except requests.exceptions.RequestException as e:
+                error_msg = f"API stream request failed: {e}"
+                # Retry only for network/timeout errors
+                if ("timeout" in str(e).lower() or "connection" in str(e).lower()) and attempt < max_retries - 1:
+                    logging.warning(f"Network stream error ({error_msg}), retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+                logging.error(error_msg)
+                return "", 0, error_msg if attempt == max_retries - 1 else error_msg
+            except Exception as e:
+                error_msg = f"An unexpected error occurred during streaming: {e}"
+                # Retry on empty response situations
+                if ("Empty response" in str(e)) and attempt < max_retries - 1:
+                    logging.warning(f"{error_msg} - retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+                logging.error(error_msg, exc_info=True)
+                return "", 0, error_msg
+
+        return "", 0, f"API stream request failed after {max_retries} retries."
 
     def _parse_response(self, response_data: dict) -> tuple[str, int, str]:
         """
@@ -659,7 +692,12 @@ class OpenAICompatibleModel(BaseModel):
         Returns:
             A list of message dictionaries formatted for the API.
         """
-        messages = [{"role": "system", "content": kwargs['system_prompt']}]
+        messages = []
+        system_prompt = kwargs.get('system_prompt', None)
+        if system_prompt is not None:
+            messages.append({"role": "system", "content": system_prompt})
+        assert 'user_prompt' in kwargs, "Missing required fields: user_prompt is required and must not be None"
+        assert kwargs['user_prompt'] is not None, "Missing required fields: user_prompt is required and must not be None"
         if kwargs.get('files'):
             messages.append({
                 "role": "user",
@@ -709,8 +747,8 @@ class OpenAICompatibleModel(BaseModel):
         params.pop('stream', None)
         params.pop('collect', None)
 
-        max_retries = 3
-        retry_delay = 10
+        max_retries = DEFAULT_MAX_RETRIES
+        retry_delay = DEFAULT_RETRY_DELAY
         for attempt in range(max_retries):
             try:
                 response = self.session.post(self.endpoint_url, json=params, timeout=DEFAULT_TIMEOUT_TIME)
@@ -752,28 +790,51 @@ class OpenAICompatibleModel(BaseModel):
         messages = self._prepare_messages(**kwargs)
         params = self._prepare_params_for_completions_endpoint(messages, **kwargs)
         params["stream"] = True
-        
+
         collect_stream_answer = kwargs.get('collect', True)
         params.pop('collect', None)
 
-        try:
-            response = self.session.post(self.endpoint_url, json=params, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
-            response.raise_for_status()
-            stream = OpenAIStreamWrapper(response)
-
-            if not collect_stream_answer:
+        if not collect_stream_answer:
+            try:
+                response = self.session.post(self.endpoint_url, json=params, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
+                response.raise_for_status()
+                stream = OpenAIStreamWrapper(response)
                 return stream, 0, None
-            else:
-                return self._parse_streaming_response(stream)
+            except requests.exceptions.RequestException as e:
+                error_msg = f"API stream request failed: {e}"
+                logging.error(error_msg)
+                return "", 0, error_msg
+            except Exception as e:
+                error_msg = f"An unexpected error occurred during streaming: {e}"
+                logging.error(error_msg, exc_info=True)
+                return "", 0, error_msg
 
-        except requests.exceptions.RequestException as e:
-            error_msg = f"API stream request failed: {e}"
-            logging.error(error_msg)
-            return "", 0, error_msg
-        except Exception as e:
-            error_msg = f"An unexpected error occurred during streaming: {e}"
-            logging.error(error_msg, exc_info=True)
-            return "", 0, error_msg
+        max_retries = DEFAULT_MAX_RETRIES
+        retry_delay = DEFAULT_RETRY_DELAY
+        for attempt in range(max_retries):
+            try:
+                response = self.session.post(self.endpoint_url, json=params, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
+                response.raise_for_status()
+                stream = OpenAIStreamWrapper(response)
+                return self._parse_streaming_response(stream)
+            except requests.exceptions.RequestException as e:
+                error_msg = f"API stream request failed: {e}"
+                if ("timeout" in str(e).lower() or "connection" in str(e).lower()) and attempt < max_retries - 1:
+                    logging.warning(f"Network stream error ({error_msg}), retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+                logging.error(error_msg)
+                return "", 0, error_msg if attempt == max_retries - 1 else error_msg
+            except Exception as e:
+                error_msg = f"An unexpected error occurred during streaming: {e}"
+                if ("Empty response" in str(e)) and attempt < max_retries - 1:
+                    logging.warning(f"{error_msg} - retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+                logging.error(error_msg, exc_info=True)
+                return "", 0, error_msg
+
+        return "", 0, f"API stream request failed after {max_retries} retries."
 
     def _parse_response(self, response_data: dict) -> tuple[str, int, str]:
         """
@@ -898,7 +959,10 @@ class OllamaModel(BaseModel):
         Returns:
             A dictionary representing the request payload.
         """
-        messages = [{"role": "system", "content": kwargs.get('system_prompt', '')}]
+        system_prompt = kwargs.get('system_prompt', None)
+        messages = [{"role": "system", "content": system_prompt}] if system_prompt else []
+        assert 'user_prompt' in kwargs, "Missing required fields: user_prompt is required and must not be None"
+        assert kwargs['user_prompt'] is not None, "Missing required fields: user_prompt is required and must not be None"
         user_message = {"role": "user", "content": kwargs.get('user_prompt', '')}
 
         if kwargs.get('files'):
@@ -961,24 +1025,47 @@ class OllamaModel(BaseModel):
 
         collect_stream_answer = kwargs.get('collect', True)
 
-        try:
-            response = self.session.post(self.endpoint_url, json=payload, stream=True, timeout=300)
-            response.raise_for_status()
-            stream = OllamaStreamWrapper(response)
-
-            if not collect_stream_answer:
+        if not collect_stream_answer:
+            try:
+                response = self.session.post(self.endpoint_url, json=payload, stream=True, timeout=300)
+                response.raise_for_status()
+                stream = OllamaStreamWrapper(response)
                 return stream, 0, None
-            else:
-                return self._parse_streaming_response(stream)
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Ollama API stream request failed: {e}"
+                logging.error(error_msg)
+                return "", 0, str(e)
+            except Exception as e:
+                error_msg = f"An unexpected error occurred during streaming: {e}"
+                logging.error(error_msg, exc_info=True)
+                return "", 0, str(e)
 
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Ollama API stream request failed: {e}"
-            logging.error(error_msg)
-            return "", 0, str(e)
-        except Exception as e:
-            error_msg = f"An unexpected error occurred during streaming: {e}"
-            logging.error(error_msg, exc_info=True)
-            return "", 0, str(e)
+        max_retries = DEFAULT_MAX_RETRIES
+        retry_delay = DEFAULT_RETRY_DELAY
+        for attempt in range(max_retries):
+            try:
+                response = self.session.post(self.endpoint_url, json=payload, stream=True, timeout=300)
+                response.raise_for_status()
+                stream = OllamaStreamWrapper(response)
+                return self._parse_streaming_response(stream)
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Ollama API stream request failed: {e}"
+                if ("timeout" in str(e).lower() or "connection" in str(e).lower()) and attempt < max_retries - 1:
+                    logging.warning(f"Network stream error ({error_msg}), retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+                logging.error(error_msg)
+                return "", 0, str(e)
+            except Exception as e:
+                error_msg = f"An unexpected error occurred during streaming: {e}"
+                if ("Empty response" in str(e)) and attempt < max_retries - 1:
+                    logging.warning(f"{error_msg} - retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+                logging.error(error_msg, exc_info=True)
+                return "", 0, str(e)
+
+        return "", 0, f"Ollama API stream request failed after {max_retries} retries."
 
     def _parse_response(self, response_data: Dict[str, Any]) -> tuple[str, int, str]:
         """
@@ -1140,9 +1227,9 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
         Returns:
             A tuple containing (list_of_embeddings, tokens_used, error_message).
         """
-        max_retries = 3
-        retry_delay = 10
-        
+        max_retries = DEFAULT_MAX_RETRIES
+        retry_delay = DEFAULT_RETRY_DELAY
+
         if isinstance(text, str):
             input_texts = [text]
         else:
@@ -1255,9 +1342,9 @@ class OllamaEmbeddingModel(BaseEmbeddingModel):
         Returns:
             A tuple containing (list_of_embeddings, tokens_used, error_message).
         """
-        max_retries = 3
-        retry_delay = 10
-        
+        max_retries = DEFAULT_MAX_RETRIES
+        retry_delay = DEFAULT_RETRY_DELAY
+
         if isinstance(text, str):
             input_texts = [text]
         else:
@@ -1322,8 +1409,8 @@ class OllamaEmbeddingModel(BaseEmbeddingModel):
 def call_language_model(
         model_provider: str,
         model_name: str,
-        system_prompt: str,
-        user_prompt: str,
+        system_prompt: str = None,
+        user_prompt: str = None,
         stream: bool = False,
         collect: bool = True,
         temperature: Optional[float] = None,
@@ -1341,8 +1428,8 @@ def call_language_model(
     Args:
         model_provider: Model provider like "openai", "aliyun", "volcengine", "ollama". OpenAI uses /reponses endpoint, and other OpenAI Compatible ones use /chat/completions endpoint.
         model_name: Model name, note that some providers may include version numbers.
-        system_prompt: System instruction.
-        user_prompt: User input text.
+        system_prompt: System instruction, optional.
+        user_prompt: User input text. Must not be None.
         stream: Whether to use streaming mode, optional.
         collect: Whether to collect streaming results (only effective when stream=True).
                 Default True for collected results, False for true streaming requiring manual collection.
@@ -1423,8 +1510,9 @@ def call_language_model(
                 **kwargs
             )
         # Log successful API call
-        _, tokens, _ = result
-        logging.info(f"API call succeeded. Model: {model_name}, Provider: {model_provider}, Tokens used: {tokens}")
+        _, tokens, error = result
+        if not error:
+            logging.info(f"API call succeeded. Model: {model_name}, Provider: {model_provider}, Tokens used: {tokens}")
         return result
     except Exception as e:
         error_msg = f"Unexpected error: {str(e)}"
@@ -1506,7 +1594,8 @@ def call_embedding_model(
         )
         # Log successful API call
         embeddings, tokens, error = result
-        logging.info(f"Embedding API call succeeded. Model: {model_name}, Provider: {model_provider}, Tokens used: {tokens}")
+        if not error:
+            logging.info(f"Embedding API call succeeded. Model: {model_name}, Provider: {model_provider}, Tokens used: {tokens}")
         return result
     except Exception as e:
         error_msg = f"Unexpected error in embedding generation: {str(e)}"
@@ -1558,8 +1647,6 @@ def batch_call_language_model(
         logging.warning("Empty requests list provided in batch_call_language_model.")
         return []
 
-    from tqdm import tqdm
-
     # Validate request format
     for i, req in enumerate(requests):
         if not isinstance(req, dict):
@@ -1567,8 +1654,8 @@ def batch_call_language_model(
             logging.error(error_msg)
             return [{"request_index": i, "response_text": "", "tokens_used": 0, "error_msg": error_msg} for i in range(len(requests))]
         
-        if 'system_prompt' not in req or 'user_prompt' not in req:
-            error_msg = f"Request {i} missing required fields: system_prompt or user_prompt"
+        if 'user_prompt' not in req:
+            error_msg = f"Request {i} missing required fields: user_prompt"
             logging.error(error_msg)
             return [{"request_index": i, "response_text": "", "tokens_used": 0, "error_msg": error_msg} for i in range(len(requests))]
 
@@ -1579,7 +1666,7 @@ def batch_call_language_model(
             response, tokens, error = call_language_model(
                 model_provider=model_provider,
                 model_name=model_name,
-                system_prompt=request['system_prompt'],
+                system_prompt=request.get('system_prompt', None),
                 user_prompt=request['user_prompt'],
                 stream=stream,
                 collect=True,
@@ -1627,7 +1714,6 @@ def batch_call_language_model(
         pbar = tqdm(total=len(requests), desc="Processing requests", unit="req")
     
     # Create file lock for thread-safe writing
-    import threading
     file_lock = threading.Lock()
     
     # Initialize output file if specified (clear existing content)

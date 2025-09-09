@@ -9,7 +9,7 @@ Tests cover the updated architecture with OpenAI /responses endpoint and OpenAI-
 
 @File    : test_call_language_model.py
 @Author  : Test Suite
-@Date    : 2025/8/12
+@Date    : 2025/9/10
 @Description: Test language model and embedding model functions with mock data.
 """
 
@@ -107,461 +107,275 @@ class TestModelConfig(unittest.TestCase):
         self.assertEqual(credentials, {})
     
     def test_get_credentials_skip_checking(self):
-        """Test getting credentials with skip checking enabled."""
-        config = ModelConfig(self.temp_config_file.name)
-        credentials = config.get_credentials('openai', 'any-model', skip_checking=True)
-        
-        self.assertEqual(credentials['provider'], 'openai')
-        self.assertEqual(credentials['model_name'], 'any-model')
-    
-    def test_get_embedding_credentials_valid_model(self):
-        """Test getting embedding credentials for valid model."""
-        config = ModelConfig(self.temp_config_file.name)
-        credentials = config.get_embedding_credentials('openai', 'text-embedding-3-small')
-        
-        self.assertEqual(credentials['provider'], 'openai')
-        self.assertEqual(credentials['model_name'], 'text-embedding-3-small')
+        #!/usr/bin/python3
+        # -*- coding: utf-8 -*-
+        """Updated test suite matching refactored implementation (requests-based).
 
+        Previous tests mocked SDK clients (OpenAI / ollama). The library now directly
+        uses requests.Session.post + streaming iter_lines. These tests mock HTTP
+        responses at the requests layer instead.
+        """
 
-class TestOpenAIModel(unittest.TestCase):
-    """Test cases for OpenAIModel class using /responses endpoint."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.mock_credentials = {
-            'provider': 'openai',
-            'model_name': 'gpt-5',
-            'api_key': 'test-key',
-            'base_url': 'https://api.openai.com/v1'
-        }
-        
-        # Mock Response object for /responses endpoint
-        self.mock_response = Mock()
-        self.mock_response.output = [Mock()]
-        self.mock_response.output[0].content = [Mock()]
-        self.mock_response.output[0].content[0].text = "This is a test response from OpenAI /responses endpoint."
-        self.mock_response.usage = Mock()
-        self.mock_response.usage.total_tokens = 100
-    
-    @patch('call_language_model.OpenAI')
-    def test_openai_model_init(self, mock_openai):
-        """Test OpenAI model initialization."""
-        model = OpenAIModel(self.mock_credentials)
-        
-        mock_openai.assert_called_once_with(
-            api_key='test-key',
-            base_url='https://api.openai.com/v1'
-        )
-        self.assertEqual(model.credentials, self.mock_credentials)
-    
-    @patch('call_language_model.OpenAI')
-    def test_generate_success(self, mock_openai):
-        """Test successful text generation."""
-        mock_client = Mock()
-        mock_client.responses.create.return_value = self.mock_response
-        mock_openai.return_value = mock_client
-        
-        model = OpenAIModel(self.mock_credentials)
-        
-        # Mock the _parse_response method to return expected values
-        with patch.object(model, '_parse_response', return_value=("This is a test response from OpenAI /responses endpoint.", 100, None)):
-            result = model.generate(
-                system_prompt="You are a helpful assistant.",
-                user_prompt="Hello, world!"
-            )
-        
-        response_text, tokens_used, error = result
-        self.assertEqual(response_text, "This is a test response from OpenAI /responses endpoint.")
-        self.assertEqual(tokens_used, 100)
-        self.assertIsNone(error)
-    
-    @patch('call_language_model.OpenAI')
-    def test_generate_with_reasoning_content(self, mock_openai):
-        """Test generation with reasoning content."""
-        # Mock response with reasoning content
-        mock_response = Mock()
-        mock_response.output = [Mock(), Mock()]  # Reasoning + output
-        mock_response.output[0].summary = [Mock()]
-        mock_response.output[0].summary[0].text = "Let me think about this..."
-        mock_response.output[1].content = [Mock()]
-        mock_response.output[1].content[0].text = "Based on my reasoning, the answer is..."
-        mock_response.usage = Mock()
-        mock_response.usage.total_tokens = 150
-        
-        mock_client = Mock()
-        mock_client.responses.create.return_value = mock_response
-        mock_openai.return_value = mock_client
-        
-        model = OpenAIModel(self.mock_credentials)
-        
-        # Mock the _parse_response method to return expected values with reasoning
-        expected_response = "<think>\nLet me think about this...\n</think>\n\nBased on my reasoning, the answer is..."
-        with patch.object(model, '_parse_response', return_value=(expected_response, 150, None)):
-            result = model.generate(
-                system_prompt="You are a helpful assistant.",
-                user_prompt="Solve this complex problem."
-            )
-        
-        response_text, tokens_used, error = result
-        self.assertIn("<think>", response_text)
-        self.assertIn("</think>", response_text)
-        self.assertEqual(tokens_used, 150)
-        self.assertIsNone(error)
-    
-    @patch('call_language_model.OpenAI')
-    def test_generate_stream_collected(self, mock_openai):
-        """Test streaming generation with collected results."""
-        # Mock streaming response chunks
-        mock_chunk1 = Mock()
-        mock_chunk1.type = 'response.output_text.delta'
-        mock_chunk1.delta = "Hello"
-        
-        mock_chunk2 = Mock()
-        mock_chunk2.type = 'response.output_text.delta'
-        mock_chunk2.delta = " world!"
-        
-        mock_chunk_final = Mock()
-        mock_chunk_final.response = Mock()
-        mock_chunk_final.response.usage = Mock()
-        mock_chunk_final.response.usage.total_tokens = 50
-        
-        mock_stream = [mock_chunk1, mock_chunk2, mock_chunk_final]
-        
-        mock_client = Mock()
-        mock_client.responses.create.return_value = mock_stream
-        mock_openai.return_value = mock_client
-        
-        model = OpenAIModel(self.mock_credentials)
-        result = model.generate_stream(
-            system_prompt="You are a helpful assistant.",
-            user_prompt="Hello!",
-            collect=True
-        )
-        
-        response_text, tokens_used, error = result
-        self.assertEqual(response_text, "Hello world!")
-        self.assertEqual(tokens_used, 50)
-        self.assertIsNone(error)
-
-
-class TestOpenAICompatibleModel(unittest.TestCase):
-    """Test cases for OpenAICompatibleModel class using /chat/completions endpoint."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.mock_credentials = {
-            'provider': 'aliyun',
-            'model_name': 'qwen-max',
-            'api_key': 'test-key',
-            'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1'
-        }
-        
-        # Mock ChatCompletion response
-        self.mock_response = Mock()
-        self.mock_response.choices = [Mock()]
-        
-        # Create a simple object for message that only has content attribute
-        class MockMessage:
-            def __init__(self):
-                self.content = "This is a test response from OpenAI-compatible endpoint."
-        
-        self.mock_response.choices[0].message = MockMessage()
-        self.mock_response.usage = Mock()
-        self.mock_response.usage.total_tokens = 100
-    
-    @patch('call_language_model.OpenAI')
-    def test_openai_compatible_model_init(self, mock_openai):
-        """Test OpenAI-compatible model initialization."""
-        model = OpenAICompatibleModel(self.mock_credentials)
-        
-        mock_openai.assert_called_once_with(
-            api_key='test-key',
-            base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
-        )
-        self.assertEqual(model.credentials, self.mock_credentials)
-    
-    @patch('call_language_model.OpenAI')
-    def test_generate_success(self, mock_openai):
-        """Test successful text generation."""
-        mock_client = Mock()
-        mock_client.chat.completions.create.return_value = self.mock_response
-        mock_openai.return_value = mock_client
-        
-        model = OpenAICompatibleModel(self.mock_credentials)
-        result = model.generate(
-            system_prompt="You are a helpful assistant.",
-            user_prompt="Hello, world!"
-        )
-        
-        response_text, tokens_used, error = result
-        self.assertEqual(response_text, "This is a test response from OpenAI-compatible endpoint.")
-        self.assertEqual(tokens_used, 100)
-        self.assertIsNone(error)
-    
-    @patch('call_language_model.OpenAI')
-    def test_generate_with_reasoning_content(self, mock_openai):
-        """Test generation with reasoning content."""
-        # Mock response with reasoning content
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        
-        class MockMessageWithReasoning:
-            def __init__(self):
-                self.content = "The final answer is 42."
-                self.reasoning_content = "Let me think step by step..."
-        
-        mock_response.choices[0].message = MockMessageWithReasoning()
-        mock_response.usage = Mock()
-        mock_response.usage.total_tokens = 150
-        
-        mock_client = Mock()
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai.return_value = mock_client
-        
-        model = OpenAICompatibleModel(self.mock_credentials)
-        result = model.generate(
-            system_prompt="You are a helpful assistant.",
-            user_prompt="What is the answer?"
-        )
-        
-        response_text, tokens_used, error = result
-        self.assertIn("<think>", response_text)
-        self.assertIn("Let me think step by step...", response_text)
-        self.assertIn("</think>", response_text)
-        self.assertIn("The final answer is 42.", response_text)
-        self.assertEqual(tokens_used, 150)
-        self.assertIsNone(error)
-    
-    @patch('call_language_model.OpenAI')
-    def test_generate_stream_collected(self, mock_openai):
-        """Test streaming generation with collected results."""
-        # Create custom delta classes that only have content attribute
-        class MockDelta1:
-            def __init__(self):
-                self.content = "Hello"
-                self.reasoning_content = None
-        
-        class MockDelta2:
-            def __init__(self):
-                self.content = " world!"
-                self.reasoning_content = None
-        
-        # Mock streaming response with proper delta structure
-        mock_chunk1 = Mock()
-        mock_chunk1.choices = [Mock()]
-        mock_chunk1.choices[0].delta = MockDelta1()
-        mock_chunk1.usage = None
-        
-        mock_chunk2 = Mock()
-        mock_chunk2.choices = [Mock()]
-        mock_chunk2.choices[0].delta = MockDelta2()
-        mock_chunk2.usage = Mock()
-        mock_chunk2.usage.total_tokens = 50
-        
-        mock_stream = [mock_chunk1, mock_chunk2]
-        
-        mock_client = Mock()
-        mock_client.chat.completions.create.return_value = mock_stream
-        mock_openai.return_value = mock_client
-        
-        model = OpenAICompatibleModel(self.mock_credentials)
-        result = model.generate_stream(
-            system_prompt="You are a helpful assistant.",
-            user_prompt="Hello!",
-            collect=True
-        )
-        
-        response_text, tokens_used, error = result
-        self.assertEqual(response_text, "Hello world!")
-        self.assertEqual(tokens_used, 50)
-        self.assertIsNone(error)
-
-
-class TestOllamaModel(unittest.TestCase):
-    """Test cases for OllamaModel class."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.mock_credentials = {
-            'provider': 'ollama',
-            'model_name': 'llama3.1:8b',
-            'base_url': 'http://localhost:11434'
-        }
-        
-        # Mock Ollama response
-        self.mock_response = Mock()
-        self.mock_response.message = Mock()
-        self.mock_response.message.content = "This is a test response from Ollama."
-        self.mock_response.eval_count = 50
-        self.mock_response.prompt_eval_count = 30
-    
-    @patch('call_language_model.ollama')
-    def test_generate_success(self, mock_ollama):
-        """Test successful text generation with Ollama."""
-        mock_ollama.chat.return_value = self.mock_response
-        
-        model = OllamaModel(self.mock_credentials)
-        result = model.generate(
-            system_prompt="You are a helpful assistant.",
-            user_prompt="Hello, world!"
-        )
-        
-        response_text, tokens_used, error = result
-        self.assertEqual(response_text, "This is a test response from Ollama.")
-        self.assertEqual(tokens_used, 80)  # eval_count + prompt_eval_count
-        self.assertIsNone(error)
-    
-    @patch('call_language_model.ollama')
-    def test_generate_stream_collected(self, mock_ollama):
-        """Test streaming generation with collected results."""
-        # Mock streaming response
-        mock_chunk1 = Mock()
-        mock_chunk1.message = Mock()
-        mock_chunk1.message.content = "Hello"
-        
-        mock_chunk2 = Mock()
-        mock_chunk2.message = Mock()
-        mock_chunk2.message.content = " from Ollama!"
-        
-        mock_stream = [mock_chunk1, mock_chunk2]
-        mock_ollama.chat.return_value = mock_stream
-        
-        model = OllamaModel(self.mock_credentials)
-        result = model.generate_stream(
-            system_prompt="You are a helpful assistant.",
-            user_prompt="Hello!",
-            collect=True
-        )
-        
-        response_text, tokens_used, error = result
-        self.assertEqual(response_text, "Hello from Ollama!")
-        self.assertEqual(tokens_used, 0)  # Streaming doesn't count tokens precisely
-        self.assertIsNone(error)
-
-
-class TestOpenAIEmbeddingModel(unittest.TestCase):
-    """Test cases for OpenAIEmbeddingModel class."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.mock_credentials = {
-            'provider': 'openai',
-            'model_name': 'text-embedding-3-small',
-            'api_key': 'test-key',
-            'base_url': 'https://api.openai.com/v1'
-        }
-        
-        # Mock embedding response
-        self.mock_response = Mock()
-        self.mock_response.data = [Mock(), Mock()]
-        self.mock_response.data[0].embedding = [0.1, 0.2, 0.3]
-        self.mock_response.data[1].embedding = [0.4, 0.5, 0.6]
-        self.mock_response.usage = Mock()
-        self.mock_response.usage.total_tokens = 50
-    
-    @patch('call_language_model.OpenAI')
-    def test_generate_embeddings_single_text(self, mock_openai):
-        """Test embedding generation for single text."""
-        mock_client = Mock()
-        mock_client.embeddings.create.return_value = self.mock_response
-        mock_openai.return_value = mock_client
-        
-        model = OpenAIEmbeddingModel(self.mock_credentials)
-        result = model.generate_embeddings("Test text")
-        
-        embeddings, tokens_used, error = result
-        self.assertEqual(len(embeddings), 2)
-        self.assertEqual(embeddings[0], [0.1, 0.2, 0.3])
-        self.assertEqual(tokens_used, 50)
-        self.assertIsNone(error)
-    
-    @patch('call_language_model.OpenAI')
-    def test_generate_embeddings_multiple_texts(self, mock_openai):
-        """Test embedding generation for multiple texts."""
-        mock_client = Mock()
-        mock_client.embeddings.create.return_value = self.mock_response
-        mock_openai.return_value = mock_client
-        
-        model = OpenAIEmbeddingModel(self.mock_credentials)
-        result = model.generate_embeddings(["Text 1", "Text 2"])
-        
-        embeddings, tokens_used, error = result
-        self.assertEqual(len(embeddings), 2)
-        self.assertEqual(tokens_used, 50)
-        self.assertIsNone(error)
-
-
-class TestOllamaEmbeddingModel(unittest.TestCase):
-    """Test cases for OllamaEmbeddingModel class."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.mock_credentials = {
-            'provider': 'ollama',
-            'model_name': 'nomic-embed-text',
-            'base_url': 'http://localhost:11434'
-        }
-        
-        # Mock Ollama embedding response
-        self.mock_response = Mock()
-        self.mock_response.embedding = [0.1, 0.2, 0.3, 0.4]
-        self.mock_response.eval_count = 25
-    
-    @patch('call_language_model.ollama')
-    def test_generate_embeddings_single_text(self, mock_ollama):
-        """Test embedding generation for single text with Ollama."""
-        mock_ollama.embeddings.return_value = self.mock_response
-        
-        model = OllamaEmbeddingModel(self.mock_credentials)
-        result = model.generate_embeddings("Test text")
-        
-        embeddings, tokens_used, error = result
-        self.assertEqual(len(embeddings), 1)
-        self.assertEqual(embeddings[0], [0.1, 0.2, 0.3, 0.4])
-        self.assertEqual(tokens_used, 25)
-        self.assertIsNone(error)
-    
-    @patch('call_language_model.ollama')
-    def test_generate_embeddings_multiple_texts(self, mock_ollama):
-        """Test embedding generation for multiple texts with Ollama."""
-        mock_ollama.embeddings.return_value = self.mock_response
-        
-        model = OllamaEmbeddingModel(self.mock_credentials)
-        result = model.generate_embeddings(["Text 1", "Text 2"])
-        
-        embeddings, tokens_used, error = result
-        self.assertEqual(len(embeddings), 2)  # Two texts processed
-        self.assertEqual(tokens_used, 50)  # 25 * 2
-        self.assertIsNone(error)
-
-
-class TestMainFunctions(unittest.TestCase):
-    """Test cases for main calling functions."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.test_config = {
-            'all_models': [
-                {
-                    'provider': 'openai',
-                    'model_name': ['gpt-4o'],
-                    'api_key': 'test-openai-key',
-                    'base_url': 'https://api.openai.com/v1'
-                }
-            ],
-            'embedding_models': [
-                {
-                    'provider': 'openai',
-                    'model_name': ['text-embedding-3-small'],
-                    'api_key': 'test-openai-key',
-                    'base_url': 'https://api.openai.com/v1'
-                }
-            ]
-        }
-        
-        # Create temporary config file
-        self.temp_config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)
+        import os
+        import json
+        import time
+        import tempfile
+        import unittest
+        from unittest.mock import patch, Mock
+        from types import SimpleNamespace
         import yaml
+
+        from call_language_model import (
+            ModelConfig,
+            OpenAIModel,
+            OpenAICompatibleModel,
+            OllamaModel,
+            OpenAIEmbeddingModel,
+            OllamaEmbeddingModel,
+            call_language_model,
+            call_embedding_model,
+            batch_call_language_model,
+        )
+
+
+        class MockHTTPResponse:
+            """Lightweight mock for requests.Response supporting json(), iter_lines()."""
+            def __init__(self, json_data=None, status_code=200, lines=None):
+                self._json_data = json_data or {}
+                self.status_code = status_code
+                self._lines = lines or []  # list of bytes or str
+                self.text = json.dumps(self._json_data)
+
+            def json(self):
+                return self._json_data
+
+            def raise_for_status(self):
+                if 400 <= self.status_code:
+                    raise Exception(f"HTTP {self.status_code}")
+
+            def iter_lines(self):
+                for ln in self._lines:
+                    if isinstance(ln, str):
+                        yield ln.encode('utf-8')
+                    else:
+                        yield ln
+
+
+        class BaseConfigTest(unittest.TestCase):
+            def setUp(self):
+                self.test_config = {
+                    'all_models': [
+                        {'provider': 'openai', 'model_name': ['gpt-4o'], 'api_key': 'k', 'base_url': 'https://api.openai.com/v1'},
+                        {'provider': 'aliyun', 'model_name': ['qwen-max'], 'api_key': 'k2', 'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1'},
+                        {'provider': 'ollama', 'model_name': ['llama3.1:8b'], 'base_url': 'http://localhost:11434'}
+                    ],
+                    'embedding_models': [
+                        {'provider': 'openai', 'model_name': ['text-embedding-3-small'], 'api_key': 'k', 'base_url': 'https://api.openai.com/v1'},
+                        {'provider': 'ollama', 'model_name': ['nomic-embed-text'], 'base_url': 'http://localhost:11434'}
+                    ]
+                }
+                self.temp_config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)
+                yaml.safe_dump(self.test_config, self.temp_config_file)
+                self.temp_config_file.close()
+
+            def tearDown(self):
+                os.unlink(self.temp_config_file.name)
+
+
+        class TestModelConfig(BaseConfigTest):
+            def test_get_credentials(self):
+                cfg = ModelConfig(self.temp_config_file.name)
+                cred = cfg.get_credentials('openai', 'gpt-4o')
+                self.assertEqual(cred['model_name'], 'gpt-4o')
+
+
+        class TestOpenAIModel(unittest.TestCase):
+            def setUp(self):
+                self.credentials = {'provider': 'openai', 'model_name': 'gpt-4o', 'api_key': 'k', 'base_url': 'https://api.openai.com/v1'}
+
+            @patch('call_language_model.requests.Session.post')
+            def test_generate_success(self, mock_post):
+                json_body = {
+                    'output': [
+                        {'content': [{'text': 'Reasoning?'}], 'summary': []},
+                        {'content': [{'text': 'Final answer.'}]}
+                    ],
+                    'usage': {'total_tokens': 42}
+                }
+                mock_post.return_value = MockHTTPResponse(json_body)
+                model = OpenAIModel(self.credentials)
+                text, tokens, err = model.generate(system_prompt='s', user_prompt='u')
+                self.assertIn('Final answer', text)
+                self.assertEqual(tokens, 42)
+                self.assertIsNone(err)
+
+            @patch('call_language_model.requests.Session.post')
+            def test_generate_stream_collected(self, mock_post):
+                # SSE chunks for streaming
+                chunks = [
+                    'data: {"type": "response.output_text.delta", "delta": "Hello"}',
+                    'data: {"type": "response.output_text.delta", "delta": " world"}',
+                    'data: {"type": "response.output_text.delta", "delta": "!"}',
+                    'data: {"type": "other", "x": 1}',
+                    'data: {"response": {"usage": {"total_tokens": 10}}}',
+                    'data: [DONE]'
+                ]
+                mock_post.return_value = MockHTTPResponse({}, lines=chunks)
+                model = OpenAIModel(self.credentials)
+                text, tokens, err = model.generate_stream(system_prompt='s', user_prompt='u', collect=True)
+                self.assertEqual(text, 'Hello world!')
+                self.assertEqual(tokens, 10)
+                self.assertIsNone(err)
+
+
+        class TestOpenAICompatibleModel(unittest.TestCase):
+            def setUp(self):
+                self.credentials = {'provider': 'aliyun', 'model_name': 'qwen-max', 'api_key': 'k', 'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1'}
+
+            @patch('call_language_model.requests.Session.post')
+            def test_generate_success(self, mock_post):
+                json_body = {
+                    'choices': [{'message': {'content': 'Compat answer'}}],
+                    'usage': {'total_tokens': 11}
+                }
+                mock_post.return_value = MockHTTPResponse(json_body)
+                model = OpenAICompatibleModel(self.credentials)
+                text, tokens, err = model.generate(system_prompt='s', user_prompt='u')
+                self.assertEqual(text, 'Compat answer')
+                self.assertEqual(tokens, 11)
+                self.assertIsNone(err)
+
+            @patch('call_language_model.requests.Session.post')
+            def test_generate_stream_collected(self, mock_post):
+                # SSE style streaming JSON lines
+                chunks = [
+                    'data: {"choices": [{"delta": {"content": "Hello"}}]}',
+                    'data: {"choices": [{"delta": {"content": " there"}}]}',
+                    'data: {"choices": [{"delta": {"content": "!"}}], "usage": {"total_tokens": 7}}',
+                    'data: [DONE]'
+                ]
+                mock_post.return_value = MockHTTPResponse({}, lines=chunks)
+                model = OpenAICompatibleModel(self.credentials)
+                text, tokens, err = model.generate_stream(system_prompt='s', user_prompt='u', collect=True)
+                self.assertEqual(text, 'Hello there!')
+                self.assertEqual(tokens, 7)
+                self.assertIsNone(err)
+
+
+        class TestOllamaModel(unittest.TestCase):
+            def setUp(self):
+                self.credentials = {'provider': 'ollama', 'model_name': 'llama3.1:8b', 'base_url': 'http://localhost:11434'}
+
+            @patch('call_language_model.requests.Session.post')
+            def test_generate_success(self, mock_post):
+                json_body = {
+                    'message': {'content': 'Hi from Ollama'},
+                    'prompt_eval_count': 5,
+                    'eval_count': 7
+                }
+                mock_post.return_value = MockHTTPResponse(json_body)
+                model = OllamaModel(self.credentials)
+                text, tokens, err = model.generate(system_prompt='s', user_prompt='u')
+                self.assertEqual(text, 'Hi from Ollama')
+                self.assertEqual(tokens, 12)
+                self.assertIsNone(err)
+
+            @patch('call_language_model.requests.Session.post')
+            def test_generate_stream_collected(self, mock_post):
+                lines = [
+                    json.dumps({'message': {'content': 'Part1 '}}),
+                    json.dumps({'message': {'content': 'Part2'}}),
+                    json.dumps({'done': True, 'prompt_eval_count': 2, 'eval_count': 3})
+                ]
+                mock_post.return_value = MockHTTPResponse({}, lines=lines)
+                model = OllamaModel(self.credentials)
+                text, tokens, err = model.generate_stream(system_prompt='s', user_prompt='u', collect=True)
+                self.assertEqual(text, 'Part1 Part2')
+                self.assertEqual(tokens, 5)
+                self.assertIsNone(err)
+
+
+        class TestEmbeddings(unittest.TestCase):
+            def setUp(self):
+                self.openai_embed_credentials = {'provider': 'openai', 'model_name': 'text-embedding-3-small', 'api_key': 'k', 'base_url': 'https://api.openai.com/v1'}
+                self.ollama_embed_credentials = {'provider': 'ollama', 'model_name': 'nomic-embed-text', 'base_url': 'http://localhost:11434'}
+
+            @patch('call_language_model.requests.Session.post')
+            def test_openai_embeddings(self, mock_post):
+                body = {
+                    'data': [
+                        {'embedding': [0.1, 0.2]},
+                        {'embedding': [0.3, 0.4]}
+                    ],
+                    'usage': {'total_tokens': 9}
+                }
+                mock_post.return_value = MockHTTPResponse(body)
+                model = OpenAIEmbeddingModel(self.openai_embed_credentials)
+                embs, tokens, err = model.generate_embeddings(['a', 'b'])
+                self.assertEqual(len(embs), 2)
+                self.assertEqual(tokens, 9)
+                self.assertIsNone(err)
+
+            @patch('call_language_model.requests.Session.post')
+            def test_ollama_embeddings(self, mock_post):
+                # Each call returns one embedding; simulate two inputs
+                responses = [
+                    MockHTTPResponse({'embedding': [0.1, 0.2], 'eval_count': 3}),
+                    MockHTTPResponse({'embedding': [0.3, 0.4], 'eval_count': 4}),
+                ]
+                mock_post.side_effect = responses
+                model = OllamaEmbeddingModel(self.ollama_embed_credentials)
+                embs, tokens, err = model.generate_embeddings(['x', 'y'])
+                self.assertEqual(len(embs), 2)
+                self.assertEqual(tokens, 7)
+                self.assertIsNone(err)
+
+
+        class TestFacadeFunctions(BaseConfigTest):
+            @patch('call_language_model.OpenAIModel.generate')
+            def test_call_language_model_openai(self, mock_gen):
+                mock_gen.return_value = ("R", 5, None)
+                txt, tokens, err = call_language_model('openai', 'gpt-4o', system_prompt='s', user_prompt='u', config_path=self.temp_config_file.name)
+                self.assertEqual(txt, 'R')
+                self.assertEqual(tokens, 5)
+                self.assertIsNone(err)
+
+            @patch('call_language_model.OpenAICompatibleModel.generate')
+            def test_call_language_model_compatible(self, mock_gen):
+                mock_gen.return_value = ("RC", 6, None)
+                # add provider to config (already in base config setUp)
+                txt, tokens, err = call_language_model('aliyun', 'qwen-max', system_prompt='s', user_prompt='u', config_path=self.temp_config_file.name)
+                self.assertEqual(tokens, 6)
+                self.assertIsNone(err)
+
+            @patch('call_language_model.OllamaModel.generate')
+            def test_call_language_model_ollama(self, mock_gen):
+                mock_gen.return_value = ("RO", 3, None)
+                txt, tokens, err = call_language_model('ollama', 'llama3.1:8b', system_prompt='s', user_prompt='u', config_path=self.temp_config_file.name)
+                self.assertEqual(tokens, 3)
+                self.assertIsNone(err)
+
+            @patch('call_language_model.call_language_model')
+            def test_batch_call_language_model(self, mock_single):
+                mock_single.side_effect = [("A", 1, None), ("B", 2, None)]
+                reqs = [
+                    {'system_prompt': 's', 'user_prompt': 'u1'},
+                    {'system_prompt': 's', 'user_prompt': 'u2'}
+                ]
+                results = batch_call_language_model('openai', 'gpt-4o', reqs, show_progress=False, config_path=self.temp_config_file.name)
+                self.assertEqual(len(results), 2)
+                self.assertIsNone(results[0]['error_msg'])
+
+
+        class TestErrorHandling(unittest.TestCase):
+            def test_missing_config(self):
+                txt, tokens, err = call_language_model('openai', 'gpt-4o', system_prompt='s', user_prompt='u', config_path=None, custom_config=None)
+                self.assertNotEqual(err, None)
+
+
+        if __name__ == '__main__':
+            unittest.main(verbosity=2)
+        self.temp_config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)
         yaml.dump(self.test_config, self.temp_config_file)
         self.temp_config_file.close()
     
