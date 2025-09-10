@@ -405,8 +405,8 @@ class OpenAIModel(BaseModel):
             messages.append({
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": kwargs['user_prompt']},
-                    *[{"type": "image_url", "image_url": {"url": self._encode_image(f)}} for f in kwargs['files']]
+                    {"type": "input_text", "text": kwargs['user_prompt']},
+                    *[{"type": "input_image", "image_url": self._encode_image(f), "detail": "high"} for f in kwargs['files']]
                 ]
             })
         else:
