@@ -852,7 +852,7 @@ class OpenAICompatibleModel(BaseModel):
                 response = self.session.post(self.endpoint_url, json=params, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
                 response.raise_for_status()
                 stream = OpenAIStreamWrapper(response)
-                return stream
+                return stream, 0, None
             except requests.exceptions.RequestException as e:
                 error_msg = f"API stream request failed: {e}"
                 logging.error(error_msg)
@@ -1087,7 +1087,7 @@ class OllamaModel(BaseModel):
                 response = self.session.post(self.endpoint_url, json=payload, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
                 response.raise_for_status()
                 stream = OllamaStreamWrapper(response)
-                return stream
+                return stream, 0, None
             except requests.exceptions.RequestException as e:
                 error_msg = f"Ollama API stream request failed: {e}"
                 logging.error(error_msg)
