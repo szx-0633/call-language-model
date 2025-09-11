@@ -20,7 +20,7 @@ import time
 import types
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Union, Any, Iterator
+from typing import Dict, List, Optional, TypeVar, Union, Any, Iterator
 
 import yaml
 import requests
@@ -101,135 +101,124 @@ logging.basicConfig(
 
 def _dict_to_namespace(data: Any) -> Any:
     """
-    Recursively converts a dictionary and its contents to types.SimpleNamespace objects,
-    allowing attribute-style access.
+    Recursively convert dict/list to SimpleNamespace for attribute-style access.
     """
     if isinstance(data, dict):
-        namespace = types.SimpleNamespace()
-        for key, value in data.items():
-            setattr(namespace, key, _dict_to_namespace(value))
-        return namespace
-    elif isinstance(data, list):
+        ns = types.SimpleNamespace()
+        for k, v in data.items():
+            setattr(ns, k, _dict_to_namespace(v))
+        return ns
+    if isinstance(data, list):
         return [_dict_to_namespace(item) for item in data]
     return data
 
 
-class OpenAIStreamWrapper:
-    """
-    Wraps a requests. Response stream to emulate the behavior of the OpenAI
-    stream object. It parses Server-Sent Events (SSE) and yields
-    structured objects that allow attribute-style access.
-    
-    Thread-safe implementation that ensures proper resource management.
-    """
-    def __init__(self, response: requests.Response):
-        self._response = response
-        self._iterator = response.iter_lines()
-        self._lock = threading.Lock()
-        self._exhausted = False
-        self._closed = False
+_T = TypeVar("_T", bound=types.SimpleNamespace)
 
-    def __iter__(self) -> Iterator[types.SimpleNamespace]:
+
+class _BaseStreamWrapper:
+    """
+    Internal base class that enforces single-thread ownership and resource cleanup.
+    """
+    def __init__(self, response: requests.Response) -> None:
+        self._response  = response
+        self._lines     = response.iter_lines(decode_unicode=True)
+        self._owner_tid = threading.get_ident()  # Creator thread id
+        self._consumed  = False
+        self._closed    = False
+
+    # Thread ownership check
+    def _check_owner(self) -> None:
+        if threading.get_ident() != self._owner_tid:
+            raise RuntimeError(
+                f"{self.__class__.__name__} is not thread-safe; "
+                "each instance must be consumed by the thread that created it."
+            )
+
+    # Resource release
+    def close(self) -> None:
         """
-        Yields structured data chunks from the SSE stream.
-        Thread-safe implementation that can only be consumed once.
+        Close the underlying HTTP response.
         """
-        with self._lock:
-            if self._exhausted or self._closed:
-                return
-            
-            try:
-                for line in self._iterator:
-                    if line:
-                        decoded_line = line.decode('utf-8')
-                        if decoded_line.startswith('data: '):
-                            json_str = decoded_line[len('data: '):]
-                            if json_str.strip() == '[DONE]':
-                                break
-                            try:
-                                chunk_dict = json.loads(json_str)
-                                yield _dict_to_namespace(chunk_dict)
-                            except json.JSONDecodeError:
-                                logging.debug(f"Skipping non-JSON line in stream: {decoded_line}")
-                                continue
-            finally:
-                self._exhausted = True
-                        
-    def __next__(self) -> types.SimpleNamespace:
-        """Get next item from iterator. Thread-safe."""
-        iterator = self.__iter__()
-        return next(iterator)
-    
-    def close(self):
-        """Close the underlying HTTP response and mark as closed."""
-        with self._lock:
-            if not self._closed:
-                self._closed = True
-                if hasattr(self._response, 'close'):
-                    self._response.close()
-    
-    def __enter__(self):
+        if not self._closed and hasattr(self._response, "close"):
+            self._response.close()
+        self._closed = True
+
+    def __enter__(self) -> "_BaseStreamWrapper":
         return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
+
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[Any],
+    ) -> None:
         self.close()
 
-
-class OllamaStreamWrapper:
+class OpenAIStreamWrapper(_BaseStreamWrapper):
     """
-    Wraps a requests.Response stream from Ollama's API to emulate the
-    behavior of the official library's stream object. It parses line-delimited
-    JSON and yields structured objects that allow attribute-style access.
-    
-    Thread-safe implementation that ensures proper resource management.
+    Convert an OpenAI-style SSE stream into a stream of SimpleNamespace objects.
     """
-    def __init__(self, response: requests.Response):
-        self._response = response
-        self._iterator = response.iter_lines()
-        self._lock = threading.Lock()
-        self._exhausted = False
-        self._closed = False
-
     def __iter__(self) -> Iterator[types.SimpleNamespace]:
         """
-        Yields structured data chunks from the line-delimited JSON stream.
-        Thread-safe implementation that can only be consumed once.
+        Yield structured chunks from the SSE stream.
+        Single-thread use only; can be iterated only once.
         """
-        with self._lock:
-            if self._exhausted or self._closed:
-                return
-            
-            try:
-                for line in self._iterator:
-                    if line:
-                        try:
-                            chunk_dict = json.loads(line.decode('utf-8'))
-                            yield _dict_to_namespace(chunk_dict)
-                        except json.JSONDecodeError:
-                            logging.debug(f"Skipping non-JSON line in stream: {line.decode('utf-8')}")
-                            continue
-            finally:
-                self._exhausted = True
-                
-                        
+        self._check_owner()
+        if self._consumed:
+            return
+        self._consumed = True
+        for line in self._lines:
+            if not line:
+                continue
+            if line.startswith("data: "):
+                json_str = line[6:]
+                if json_str.strip() == "[DONE]":
+                    break
+                try:
+                    yield _dict_to_namespace(json.loads(json_str))
+                except json.JSONDecodeError:
+                    logging.debug("Skipping non-JSON line: %s", line)
+        self.close()  # Release connection when stream ends
+
     def __next__(self) -> types.SimpleNamespace:
-        """Get next item from iterator. Thread-safe."""
-        iterator = self.__iter__()
-        return next(iterator)
-    
-    def close(self):
-        """Close the underlying HTTP response and mark as closed."""
-        with self._lock:
-            if not self._closed:
-                self._closed = True
-                if hasattr(self._response, 'close'):
-                    self._response.close()
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Return the next chunk; single-thread use only.
+        """
+        if not hasattr(self, "_gen"):
+            self._gen = iter(self)
+        return next(self._gen)
+
+
+class OllamaStreamWrapper(_BaseStreamWrapper):
+    """
+    Convert an Ollama-style line-delimited JSON stream into SimpleNamespace objects.
+    """
+    def __iter__(self) -> Iterator[types.SimpleNamespace]:
+        """
+        Yield structured chunks from the JSONL stream.
+        Single-thread use only; can be iterated only once.
+        """
+        self._check_owner()
+        if self._consumed:
+            return
+        self._consumed = True
+        for line in self._lines:
+            if not line:
+                continue
+            try:
+                yield _dict_to_namespace(json.loads(line))
+            except json.JSONDecodeError:
+                logging.debug("Skipping non-JSON line: %s", line)
         self.close()
+
+    def __next__(self) -> types.SimpleNamespace:
+        """
+        Return the next chunk; single-thread use only.
+        """
+        if not hasattr(self, "_gen"):
+            self._gen = iter(self)
+        return next(self._gen)
 
 
 class ModelConfig:
