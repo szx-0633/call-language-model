@@ -443,6 +443,7 @@ def test_real_time_save():
             raise Exception(f"Output file {output_file} was not created")
         
         print("✅ Test passed!")
+        os.remove(output_file)
         return True
         
     except Exception as e:
@@ -513,10 +514,244 @@ def test_custom_configuration():
         return False
 
 
+def test_high_concurrency_thread_safety():
+    """Test thread safety with high concurrency (64 threads) using real API calls."""
+    print("\n" + "="*60)
+    print("TEST 9: High Concurrency Thread Safety Test (64 threads)")
+    print("="*60)
+    
+    import threading
+    import concurrent.futures
+    from collections import Counter, defaultdict
+    import random
+    
+    try:
+        # Configuration for minimal token usage
+        THREAD_COUNT = 64  # Set to 64 for high concurrency
+        REQUESTS_PER_THREAD = 1  # Reduced from 2 to minimize load
+        TOTAL_REQUESTS = THREAD_COUNT * REQUESTS_PER_THREAD
+        
+        print(f"Configuration:")
+        print(f"  - Threads: {THREAD_COUNT}")
+        print(f"  - Requests per thread: {REQUESTS_PER_THREAD}")
+        print(f"  - Total requests: {TOTAL_REQUESTS}")
+        print(f"  - Expected total token usage: ~{TOTAL_REQUESTS * 10} tokens (minimal)")
+        
+        # Results storage with thread safety
+        results_lock = threading.Lock()
+        results = []
+        errors = []
+        thread_results = defaultdict(list)
+        
+        # Test data - each thread gets a unique number to verify no cross-contamination
+        def generate_test_prompts():
+            """Generate test prompts that expect specific numeric responses"""
+            prompts = []
+            for thread_id in range(THREAD_COUNT):
+                for req_id in range(REQUESTS_PER_THREAD):
+                    # Use a simple arithmetic to get predictable results
+                    a = thread_id + 1
+                    b = req_id + 1
+                    expected = a + b
+                    prompt = {
+                        'thread_id': thread_id,
+                        'request_id': req_id,
+                        'a': a,
+                        'b': b,
+                        'expected': expected,
+                        'prompt': f"{a} + {b} = ?"
+                    }
+                    prompts.append(prompt)
+            return prompts
+        
+        test_prompts = generate_test_prompts()
+        print(f"  - Generated {len(test_prompts)} test prompts")
+        
+        def worker_thread(thread_id, assigned_prompts):
+            """Worker function for each thread"""
+            thread_start_time = time.time()
+            thread_results_local = []
+            thread_errors_local = []
+            
+            try:
+                for prompt_data in assigned_prompts:
+                    try:
+                        # Make API call with minimal token usage
+                        response, tokens_used, error = call_language_model(
+                            model_provider='aliyun',
+                            model_name='qwen2.5-7b-instruct',
+                            system_prompt="You are a calculator. Respond only with the numeric answer, no explanation.",
+                            user_prompt=prompt_data['prompt'],
+                            max_tokens=5,  # Minimal tokens to reduce cost
+                            temperature=0,  # Deterministic responses
+                            stream=False,
+                            config_path="./llm_config.yaml"
+                        )
+                        
+                        # Parse the response to extract the number
+                        try:
+                            # Extract number from response
+                            response_cleaned = ''.join(filter(str.isdigit, response.strip()))
+                            actual_result = int(response_cleaned) if response_cleaned else None
+                        except:
+                            actual_result = None
+                        
+                        result = {
+                            'thread_id': thread_id,
+                            'request_id': prompt_data['request_id'],
+                            'prompt': prompt_data['prompt'],
+                            'expected': prompt_data['expected'],
+                            'response': response,
+                            'actual_result': actual_result,
+                            'tokens_used': tokens_used,
+                            'error': error,
+                            'correct': actual_result == prompt_data['expected'],
+                            'timestamp': time.time()
+                        }
+                        thread_results_local.append(result)
+                        
+                        # Small delay to reduce API rate limiting
+                        time.sleep(0.5 + (thread_id % 5) * 0.02)  # Increased and staggered delays
+                        
+                    except Exception as e:
+                        thread_errors_local.append({
+                            'thread_id': thread_id,
+                            'error': str(e),
+                            'prompt_data': prompt_data
+                        })
+                
+            except Exception as e:
+                thread_errors_local.append({
+                    'thread_id': thread_id,
+                    'error': f"Thread error: {str(e)}",
+                    'prompt_data': None
+                })
+            
+            # Thread-safe result storage
+            with results_lock:
+                results.extend(thread_results_local)
+                errors.extend(thread_errors_local)
+                thread_results[thread_id] = thread_results_local
+            
+            thread_duration = time.time() - thread_start_time
+            print(f"    Thread {thread_id}: {len(thread_results_local)} requests completed in {thread_duration:.2f}s")
+        
+        # Distribute prompts among threads
+        prompts_per_thread = []
+        for i in range(THREAD_COUNT):
+            start_idx = i * REQUESTS_PER_THREAD
+            end_idx = start_idx + REQUESTS_PER_THREAD
+            prompts_per_thread.append(test_prompts[start_idx:end_idx])
+        
+        print(f"\nStarting {THREAD_COUNT} concurrent threads...")
+        start_time = time.time()
+        
+        # Launch all threads using ThreadPoolExecutor for better management
+        with concurrent.futures.ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
+            # Submit all tasks
+            future_to_thread = {
+                executor.submit(worker_thread, thread_id, prompts_per_thread[thread_id]): thread_id
+                for thread_id in range(THREAD_COUNT)
+            }
+            
+            # Wait for completion with progress tracking
+            completed = 0
+            for future in concurrent.futures.as_completed(future_to_thread):
+                thread_id = future_to_thread[future]
+                completed += 1
+                if completed % 10 == 0 or completed == THREAD_COUNT:
+                    print(f"    Progress: {completed}/{THREAD_COUNT} threads completed")
+                
+                try:
+                    future.result()  # This will raise an exception if the thread failed
+                except Exception as e:
+                    print(f"    Thread {thread_id} failed: {e}")
+        
+        total_duration = time.time() - start_time
+        
+        # Analysis and validation
+        print(f"\n✓ Concurrency Test Completed:")
+        print(f"  - Total Duration: {total_duration:.2f} seconds")
+        print(f"  - Total Results: {len(results)}")
+        print(f"  - Total Errors: {len(errors)}")
+        
+        # Thread safety analysis
+        successful_results = [r for r in results if not r['error']]
+        correct_results = [r for r in successful_results if r['correct']]
+        
+        print(f"  - Successful API calls: {len(successful_results)}/{TOTAL_REQUESTS}")
+        print(f"  - Correct calculations: {len(correct_results)}/{len(successful_results)}")
+        
+        # Token usage analysis
+        total_tokens = sum(r['tokens_used'] for r in successful_results)
+        print(f"  - Total tokens used: {total_tokens}")
+        print(f"  - Average tokens per request: {total_tokens/len(successful_results):.1f}" if successful_results else "  - No successful requests")
+        
+        # Thread distribution analysis
+        thread_distribution = Counter(r['thread_id'] for r in successful_results)
+        print(f"  - Threads with results: {len(thread_distribution)}/{THREAD_COUNT}")
+        
+        # Validate thread safety - check for data corruption/mixing
+        thread_safety_issues = []
+        for result in successful_results:
+            # Check if thread got correct data for its assigned calculation
+            if result['correct'] is False and result['actual_result'] is not None:
+                # Check if the result belongs to another thread's calculation
+                for other_result in successful_results:
+                    if (other_result['thread_id'] != result['thread_id'] and 
+                        other_result['expected'] == result['actual_result']):
+                        thread_safety_issues.append({
+                            'result_thread': result['thread_id'],
+                            'expected': result['expected'],
+                            'got': result['actual_result'],
+                            'possibly_from_thread': other_result['thread_id']
+                        })
+                        break
+        
+        print(f"  - Potential thread safety issues: {len(thread_safety_issues)}")
+        
+        # Display sample results
+        if successful_results:
+            print(f"\n  Sample Results:")
+            for i, result in enumerate(successful_results[:5]):
+                status = "✓" if result['correct'] else "✗"
+                print(f"    {status} Thread {result['thread_id']}: {result['prompt']} → {result['response'].strip()} (expected: {result['expected']})")
+        
+        # Display any errors
+        if errors:
+            print(f"\n  Errors encountered:")
+            error_types = Counter(error['error'][:50] for error in errors)
+            for error_msg, count in error_types.most_common(3):
+                print(f"    - {error_msg}... (×{count})")
+        
+        # Display thread safety issues
+        if thread_safety_issues:
+            print(f"\n  ⚠️  Thread Safety Issues Detected:")
+            for issue in thread_safety_issues[:3]:
+                print(f"    - Thread {issue['result_thread']} expected {issue['expected']} but got {issue['got']} (possibly from Thread {issue['possibly_from_thread']})")
+        
+        # Validation assertions
+        assert len(results) > 0, "Should have at least some results"
+        assert len(successful_results) > TOTAL_REQUESTS * 0.5, f"Should have at least 50% successful requests, got {len(successful_results)}/{TOTAL_REQUESTS}"  # Reduced from 70%
+        assert len(thread_safety_issues) == 0, f"Should have no thread safety issues, found {len(thread_safety_issues)}"
+        assert len(correct_results) > len(successful_results) * 0.8, f"Should have at least 80% correct calculations, got {len(correct_results)}/{len(successful_results)}"
+        
+        print(f"\n✅ High Concurrency Thread Safety Test Passed!")
+        print(f"   - No thread safety issues detected")
+        print(f"   - {len(correct_results)}/{len(successful_results)} calculations were correct")
+        print(f"   - Total API cost: ~{total_tokens} tokens")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Test failed: {str(e)}")
+        return False
+
+
 def test_error_handling():
     """Test error handling with invalid configurations."""
     print("\n" + "="*60)
-    print("TEST 9: Error Handling")
+    print("TEST 10: Error Handling")
     print("="*60)
     
     try:
@@ -571,6 +806,7 @@ def run_all_tests():
         ("Batch Language Model Processing", test_batch_language_model_processing),
         ("Batch Result Real-Time Saving", test_real_time_save),
         ("Custom Configuration", test_custom_configuration),
+        ("High Concurrency Thread Safety (64 threads)", test_high_concurrency_thread_safety),
         ("Error Handling", test_error_handling),
     ]
     

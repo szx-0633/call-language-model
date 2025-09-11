@@ -7,7 +7,7 @@ and embedding models through OpenAI-compatible APIs and Ollama.
 
 @File    : call_language_model.py
 @Author  : Zhangxiao Shen
-@Date    : 2025/9/10
+@Date    : 2025/9/12
 @Description: Call language models and embedding models using OpenAI or Ollama APIs.
 """
 
@@ -88,7 +88,7 @@ from tqdm import tqdm
 DEFAULT_CONFIG_PATH = './llm_config.yaml'
 DEFAULT_LOG_FILE = './model_api.log'
 DEFAULT_MAX_RETRIES = 5
-DEFAULT_RETRY_DELAY = 10
+DEFAULT_RETRY_DELAY = 5
 DEFAULT_TIMEOUT_TIME = 300
 
 # Logging configuration
@@ -119,30 +119,60 @@ class OpenAIStreamWrapper:
     Wraps a requests. Response stream to emulate the behavior of the OpenAI
     stream object. It parses Server-Sent Events (SSE) and yields
     structured objects that allow attribute-style access.
+    
+    Thread-safe implementation that ensures proper resource management.
     """
     def __init__(self, response: requests.Response):
+        self._response = response
         self._iterator = response.iter_lines()
+        self._lock = threading.Lock()
+        self._exhausted = False
+        self._closed = False
 
     def __iter__(self) -> Iterator[types.SimpleNamespace]:
         """
         Yields structured data chunks from the SSE stream.
+        Thread-safe implementation that can only be consumed once.
         """
-        for line in self._iterator:
-            if line:
-                decoded_line = line.decode('utf-8')
-                if decoded_line.startswith('data: '):
-                    json_str = decoded_line[len('data: '):]
-                    if json_str.strip() == '[DONE]':
-                        break
-                    try:
-                        chunk_dict = json.loads(json_str)
-                        yield _dict_to_namespace(chunk_dict)
-                    except json.JSONDecodeError:
-                        logging.debug(f"Skipping non-JSON line in stream: {decoded_line}")
-                        continue
+        with self._lock:
+            if self._exhausted or self._closed:
+                return
+            
+            try:
+                for line in self._iterator:
+                    if line:
+                        decoded_line = line.decode('utf-8')
+                        if decoded_line.startswith('data: '):
+                            json_str = decoded_line[len('data: '):]
+                            if json_str.strip() == '[DONE]':
+                                break
+                            try:
+                                chunk_dict = json.loads(json_str)
+                                yield _dict_to_namespace(chunk_dict)
+                            except json.JSONDecodeError:
+                                logging.debug(f"Skipping non-JSON line in stream: {decoded_line}")
+                                continue
+            finally:
+                self._exhausted = True
                         
     def __next__(self) -> types.SimpleNamespace:
-        return next(self.__iter__())
+        """Get next item from iterator. Thread-safe."""
+        iterator = self.__iter__()
+        return next(iterator)
+    
+    def close(self):
+        """Close the underlying HTTP response and mark as closed."""
+        with self._lock:
+            if not self._closed:
+                self._closed = True
+                if hasattr(self._response, 'close'):
+                    self._response.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 
 class OllamaStreamWrapper:
@@ -150,26 +180,56 @@ class OllamaStreamWrapper:
     Wraps a requests.Response stream from Ollama's API to emulate the
     behavior of the official library's stream object. It parses line-delimited
     JSON and yields structured objects that allow attribute-style access.
+    
+    Thread-safe implementation that ensures proper resource management.
     """
     def __init__(self, response: requests.Response):
+        self._response = response
         self._iterator = response.iter_lines()
+        self._lock = threading.Lock()
+        self._exhausted = False
+        self._closed = False
 
     def __iter__(self) -> Iterator[types.SimpleNamespace]:
         """
         Yields structured data chunks from the line-delimited JSON stream.
+        Thread-safe implementation that can only be consumed once.
         """
-        for line in self._iterator:
-            if line:
-                try:
-                    chunk_dict = json.loads(line.decode('utf-8'))
-                    yield _dict_to_namespace(chunk_dict)
-                except json.JSONDecodeError:
-                    logging.debug(f"Skipping non-JSON line in stream: {line.decode('utf-8')}")
-                    continue
+        with self._lock:
+            if self._exhausted or self._closed:
+                return
+            
+            try:
+                for line in self._iterator:
+                    if line:
+                        try:
+                            chunk_dict = json.loads(line.decode('utf-8'))
+                            yield _dict_to_namespace(chunk_dict)
+                        except json.JSONDecodeError:
+                            logging.debug(f"Skipping non-JSON line in stream: {line.decode('utf-8')}")
+                            continue
+            finally:
+                self._exhausted = True
                 
                         
     def __next__(self) -> types.SimpleNamespace:
-        return next(self.__iter__())
+        """Get next item from iterator. Thread-safe."""
+        iterator = self.__iter__()
+        return next(iterator)
+    
+    def close(self):
+        """Close the underlying HTTP response and mark as closed."""
+        with self._lock:
+            if not self._closed:
+                self._closed = True
+                if hasattr(self._response, 'close'):
+                    self._response.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 
 class ModelConfig:
@@ -462,7 +522,7 @@ class OpenAIModel(BaseModel):
                 return self._parse_response(response_data)
             except requests.exceptions.RequestException as e:
                 error_msg = f"API request failed: {e}"
-                if "timeout" in str(e).lower() or "connection" in str(e).lower():
+                if "timeout" in str(e).lower() or "connection" in str(e).lower() or "too many requests" in str(e).lower():
                     if attempt < max_retries - 1:
                         logging.warning(f"Network error ({error_msg}), retrying in {retry_delay}s...")
                         time.sleep(retry_delay)
@@ -530,7 +590,7 @@ class OpenAIModel(BaseModel):
             except requests.exceptions.RequestException as e:
                 error_msg = f"API stream request failed: {e}"
                 # Retry only for network/timeout errors
-                if ("timeout" in str(e).lower() or "connection" in str(e).lower()) and attempt < max_retries - 1:
+                if ("timeout" in str(e).lower() or "connection" in str(e).lower() or "too many requests" in str(e).lower()) and attempt < max_retries - 1:
                     logging.warning(f"Network stream error ({error_msg}), retrying in {retry_delay}s...")
                     time.sleep(retry_delay)
                     continue
@@ -630,6 +690,10 @@ class OpenAIModel(BaseModel):
             error_msg = f"Failed to process stream: {e}"
             logging.error(error_msg, exc_info=True)
             return "", 0, error_msg
+        finally:
+            # Ensure stream is properly closed
+            if hasattr(stream, 'close'):
+                stream.close()
 
 
 class OpenAICompatibleModel(BaseModel):
@@ -757,7 +821,7 @@ class OpenAICompatibleModel(BaseModel):
                 return self._parse_response(response_data)
             except requests.exceptions.RequestException as e:
                 error_msg = f"API request failed: {e}"
-                if "timeout" in str(e).lower() or "connection" in str(e).lower():
+                if "timeout" in str(e).lower() or "connection" in str(e).lower() or "too many requests" in str(e).lower():
                     if attempt < max_retries - 1:
                         logging.warning(f"Network error ({error_msg}), retrying in {retry_delay}s...")
                         time.sleep(retry_delay)
@@ -819,7 +883,7 @@ class OpenAICompatibleModel(BaseModel):
                 return self._parse_streaming_response(stream)
             except requests.exceptions.RequestException as e:
                 error_msg = f"API stream request failed: {e}"
-                if ("timeout" in str(e).lower() or "connection" in str(e).lower()) and attempt < max_retries - 1:
+                if ("timeout" in str(e).lower() or "connection" in str(e).lower() or "too many requests" in str(e).lower()) and attempt < max_retries - 1:
                     logging.warning(f"Network stream error ({error_msg}), retrying in {retry_delay}s...")
                     time.sleep(retry_delay)
                     continue
@@ -902,6 +966,10 @@ class OpenAICompatibleModel(BaseModel):
             error_msg = f"Failed to process stream: {e}"
             logging.error(error_msg, exc_info=True)
             return "", 0, error_msg
+        finally:
+            # Ensure stream is properly closed
+            if hasattr(stream, 'close'):
+                stream.close()
 
 
 class OllamaModel(BaseModel):
@@ -1050,7 +1118,7 @@ class OllamaModel(BaseModel):
                 return self._parse_streaming_response(stream)
             except requests.exceptions.RequestException as e:
                 error_msg = f"Ollama API stream request failed: {e}"
-                if ("timeout" in str(e).lower() or "connection" in str(e).lower()) and attempt < max_retries - 1:
+                if ("timeout" in str(e).lower() or "connection" in str(e).lower() or "too many requests" in str(e).lower()) and attempt < max_retries - 1:
                     logging.warning(f"Network stream error ({error_msg}), retrying in {retry_delay}s...")
                     time.sleep(retry_delay)
                     continue
@@ -1128,6 +1196,10 @@ class OllamaModel(BaseModel):
             error_msg = f"Failed to process stream: {e}"
             logging.error(error_msg, exc_info=True)
             return "", 0, error_msg
+        finally:
+            # Ensure stream is properly closed
+            if hasattr(stream, 'close'):
+                stream.close()
 
 
 class BaseEmbeddingModel:
@@ -1259,7 +1331,7 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
             except requests.exceptions.RequestException as e:
                 # Handle network-related errors (timeout, connection error)
                 error_msg = f"API request failed: {e}"
-                if "timeout" in str(e).lower() or "connection" in str(e).lower():
+                if "timeout" in str(e).lower() or "connection" in str(e).lower() or "too many requests" in str(e).lower():
                     if attempt < max_retries - 1:
                         logging.warning(f"Network error ({error_msg}), retrying in {retry_delay}s...")
                         time.sleep(retry_delay)
@@ -1383,7 +1455,7 @@ class OllamaEmbeddingModel(BaseEmbeddingModel):
                     
                 except requests.exceptions.RequestException as e:
                     error_msg = f"API request failed for prompt '{t[:30]}...': {e}"
-                    if "timeout" in str(e).lower() or "connection" in str(e).lower():
+                    if "timeout" in str(e).lower() or "connection" in str(e).lower() or "too many requests" in str(e).lower():
                         if attempt < max_retries - 1:
                             logging.warning(f"Network error ({error_msg}), retrying in {retry_delay}s...")
                             time.sleep(retry_delay)
