@@ -852,7 +852,7 @@ class OpenAICompatibleModel(BaseModel):
                 response = self.session.post(self.endpoint_url, json=params, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
                 response.raise_for_status()
                 stream = OpenAIStreamWrapper(response)
-                return stream, 0, None
+                return stream
             except requests.exceptions.RequestException as e:
                 error_msg = f"API stream request failed: {e}"
                 logging.error(error_msg)
@@ -1084,10 +1084,10 @@ class OllamaModel(BaseModel):
 
         if not collect_stream_answer:
             try:
-                response = self.session.post(self.endpoint_url, json=payload, stream=True, timeout=300)
+                response = self.session.post(self.endpoint_url, json=payload, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
                 response.raise_for_status()
                 stream = OllamaStreamWrapper(response)
-                return stream, 0, None
+                return stream
             except requests.exceptions.RequestException as e:
                 error_msg = f"Ollama API stream request failed: {e}"
                 logging.error(error_msg)
@@ -1101,7 +1101,7 @@ class OllamaModel(BaseModel):
         retry_delay = DEFAULT_RETRY_DELAY
         for attempt in range(max_retries):
             try:
-                response = self.session.post(self.endpoint_url, json=payload, stream=True, timeout=300)
+                response = self.session.post(self.endpoint_url, json=payload, stream=True, timeout=DEFAULT_TIMEOUT_TIME)
                 response.raise_for_status()
                 stream = OllamaStreamWrapper(response)
                 return self._parse_streaming_response(stream)
@@ -1428,7 +1428,7 @@ class OllamaEmbeddingModel(BaseEmbeddingModel):
                 
             for attempt in range(max_retries):
                 try:
-                    response = self.session.post(self.endpoint_url, json=payload, timeout=60)
+                    response = self.session.post(self.endpoint_url, json=payload, timeout=DEFAULT_TIMEOUT_TIME)
                     response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
                     
                     response_data = response.json()
