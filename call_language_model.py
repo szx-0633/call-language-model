@@ -155,6 +155,7 @@ class _BaseStreamWrapper:
     ) -> None:
         self.close()
 
+
 class OpenAIStreamWrapper(_BaseStreamWrapper):
     """
     Convert an OpenAI-style SSE stream into a stream of SimpleNamespace objects.
@@ -905,6 +906,8 @@ class OpenAICompatibleModel(BaseModel):
             
             if 'reasoning_content' in message and message['reasoning_content']:
                 complete_response = f"<think>\n{message['reasoning_content']}\n</think>\n\n{complete_response}"
+            elif 'reasoning' in message and message['reasoning']:
+                complete_response = f"<think>\n{message['reasoning']}\n</think>\n\n{complete_response}"
             
             if not complete_response.strip():
                 raise ValueError("Empty response content received from API")
@@ -939,6 +942,8 @@ class OpenAICompatibleModel(BaseModel):
                         complete_response += delta.content
                     if hasattr(delta, 'reasoning_content') and delta.reasoning_content is not None:
                         reasoning_content += delta.reasoning_content
+                    elif hasattr(delta, 'reasoning') and delta.reasoning is not None:
+                        reasoning_content += delta.reasoning
                 
                 if hasattr(chunk, 'usage') and hasattr(chunk.usage, 'total_tokens') and chunk.usage.total_tokens is not None:
                     returned_tokens = chunk.usage.total_tokens

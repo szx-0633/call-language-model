@@ -29,3 +29,6 @@ env/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# temp files
+temp.py
