@@ -5,7 +5,7 @@
 ## 主要特点
 
 - **支持多种模型提供商**：OpenAI、OpenAI兼容（阿里云、火山引擎）、Ollama本地模型等
-- **支持多模态输入**：文本 + 图像 + 文档（PDF/Office 等）统一处理
+- **支持多模态输入**：文本 + 图像 + 文档（PDF已经过测试，需API提供商支持）统一处理
 - **支持嵌入模型调用**：提供统一的向量生成接口
 - **支持批量并行调用**：可同时处理多个请求，提高处理效率
 - **进度条显示**：批量处理时可实时查看处理进度和成功率
@@ -352,10 +352,6 @@ batch_results = batch_call_language_model(
 - `custom_config`: 自定义配置字典，包含api_key和base_url，优先于config_path（可选）
 - `max_completion_tokens`: 最大完成tokens数，用于控制回复长度（可选）
 - `**kwargs`: 其他任意API参数，会直接传递给底层API调用
-- `files`: 文件路径列表，用于多模态输入（图片会自动识别为图像，其他类型按文件传输；Ollama 仅支持图片）
-- `skip_model_checking`: 是否跳过模型名称检查，设为True时可使用任意模型名（默认 False）
-- `config_path`: 配置文件路径（默认 "./llm_config.yaml"）
-- `custom_config`: 自定义配置字典，包含api_key和base_url，优先于config_path（可选）
 
 ### `call_embedding_model` 函数参数
 
