@@ -15,6 +15,7 @@ and embedding models through OpenAI-compatible APIs and Ollama.
 import base64
 import json
 import logging
+import mimetypes
 import os
 import time
 import types
@@ -25,6 +26,7 @@ from typing import Dict, List, Optional, TypeVar, Union, Any, Iterator
 import yaml
 import requests
 from tqdm import tqdm
+
 
 # NOTE:不需要OpenAI和Ollama库，使用requests直接与底层端点通信，但是后续使用方法与官方库调用一致
 
@@ -90,6 +92,7 @@ DEFAULT_LOG_FILE = './model_api.log'
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_RETRY_DELAY = 5
 DEFAULT_TIMEOUT_TIME = 300
+_IMAGE_EXTENSIONS = {"jpg","jpeg","png","gif","bmp","webp","tiff","tif","ico"}
 
 # Logging configuration
 logging.basicConfig(
@@ -432,8 +435,28 @@ class OpenAIModel(BaseModel):
         """
         with open(image_path, "rb") as img_file:
             base64_str = base64.b64encode(img_file.read()).decode('utf-8')
-            img_format = image_path.split('.')[-1]
-            return f"data:image/{img_format};base64,{base64_str}"
+        mime_type, _ = mimetypes.guess_type(image_path)
+        if not mime_type:
+            ext = os.path.splitext(image_path)[1].lstrip('.').lower()
+            fallback = ext or "png"
+            mime_type = f"image/{fallback}"
+        return f"data:{mime_type};base64,{base64_str}"
+
+    @staticmethod
+    def _is_image_file(file_path: str) -> bool:
+        _, ext = os.path.splitext(file_path)
+        return ext.lower().lstrip('.') in _IMAGE_EXTENSIONS
+
+    @staticmethod
+    def _encode_file_to_data_url(file_path: str) -> tuple[str, str]:
+        mime_type, _ = mimetypes.guess_type(file_path)
+        if not mime_type:
+            mime_type = "application/octet-stream"
+        with open(file_path, "rb") as file_obj:
+            encoded = base64.b64encode(file_obj.read()).decode('utf-8')
+        filename = os.path.basename(file_path)
+        data_url = f"data:{mime_type};base64,{encoded}"
+        return filename, data_url
 
     def _prepare_messages(self, **kwargs) -> list:
         """
@@ -451,14 +474,23 @@ class OpenAIModel(BaseModel):
             messages.append({"role": "system", "content": system_prompt})
         assert 'user_prompt' in kwargs, "Missing required fields: user_prompt is required and must not be None"
         assert kwargs['user_prompt'] is not None, "Missing required fields: user_prompt is required and must not be None"
-        if kwargs.get('files'):
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": kwargs['user_prompt']},
-                    *[{"type": "input_image", "image_url": self._encode_image(f), "detail": "high"} for f in kwargs['files']]
-                ]
-            })
+        files = kwargs.get('files') or []
+        if files:
+            user_contents = [{"type": "input_text", "text": kwargs['user_prompt']}]
+            for file_path in files:
+                if self._is_image_file(file_path):
+                    user_contents.append({
+                        "type": "input_image",
+                        "image_url": self._encode_image(file_path)
+                    })
+                else:
+                    filename, data_url = self._encode_file_to_data_url(file_path)
+                    user_contents.append({
+                        "type": "input_file",
+                        "filename": filename,
+                        "file_data": data_url,
+                    })
+            messages.append({"role": "user", "content": user_contents})
         else:
             messages.append({"role": "user", "content": kwargs['user_prompt']})
         return messages
@@ -733,8 +765,28 @@ class OpenAICompatibleModel(BaseModel):
         """
         with open(image_path, "rb") as img_file:
             base64_str = base64.b64encode(img_file.read()).decode('utf-8')
-            img_format = image_path.split('.')[-1]
-            return f"data:image/{img_format};base64,{base64_str}"
+        mime_type, _ = mimetypes.guess_type(image_path)
+        if not mime_type:
+            ext = os.path.splitext(image_path)[1].lstrip('.').lower()
+            fallback = ext or "png"
+            mime_type = f"image/{fallback}"
+        return f"data:{mime_type};base64,{base64_str}"
+
+    @staticmethod
+    def _is_image_file(file_path: str) -> bool:
+        _, ext = os.path.splitext(file_path)
+        return ext.lower().lstrip('.') in _IMAGE_EXTENSIONS
+
+    @staticmethod
+    def _encode_file_to_data_url(file_path: str) -> tuple[str, str]:
+        mime_type, _ = mimetypes.guess_type(file_path)
+        if not mime_type:
+            mime_type = "application/octet-stream"
+        with open(file_path, "rb") as file_obj:
+            encoded = base64.b64encode(file_obj.read()).decode('utf-8')
+        filename = os.path.basename(file_path)
+        data_url = f"data:{mime_type};base64,{encoded}"
+        return filename, data_url
 
     def _prepare_messages(self, **kwargs) -> list:
         """
@@ -752,14 +804,25 @@ class OpenAICompatibleModel(BaseModel):
             messages.append({"role": "system", "content": system_prompt})
         assert 'user_prompt' in kwargs, "Missing required fields: user_prompt is required and must not be None"
         assert kwargs['user_prompt'] is not None, "Missing required fields: user_prompt is required and must not be None"
-        if kwargs.get('files'):
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": kwargs['user_prompt']},
-                    *[{"type": "image_url", "image_url": {"url": self._encode_image(f)}} for f in kwargs['files']]
-                ]
-            })
+        files = kwargs.get('files') or []
+        if files:
+            user_contents = [{"type": "text", "text": kwargs['user_prompt']}]
+            for file_path in files:
+                if self._is_image_file(file_path):
+                    user_contents.append({
+                        "type": "image_url",
+                        "image_url": {"url": self._encode_image(file_path)},
+                    })
+                else:
+                    filename, data_url = self._encode_file_to_data_url(file_path)
+                    user_contents.append({
+                        "type": "file",
+                        "file": {
+                            "filename": filename,
+                            "file_data": data_url,
+                        },
+                    })
+            messages.append({"role": "user", "content": user_contents})
         else:
             messages.append({"role": "user", "content": kwargs['user_prompt']})
         return messages
@@ -1011,6 +1074,11 @@ class OllamaModel(BaseModel):
         with open(image_path, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode('utf-8')
 
+    @staticmethod
+    def _is_image_file(file_path: str) -> bool:
+        _, ext = os.path.splitext(file_path)
+        return ext.lower().lstrip('.') in _IMAGE_EXTENSIONS
+
     def _prepare_payload(self, **kwargs) -> Dict[str, Any]:
         """
         Prepare the JSON payload for an Ollama API request.
@@ -1026,9 +1094,12 @@ class OllamaModel(BaseModel):
         assert 'user_prompt' in kwargs, "Missing required fields: user_prompt is required and must not be None"
         assert kwargs['user_prompt'] is not None, "Missing required fields: user_prompt is required and must not be None"
         user_message = {"role": "user", "content": kwargs.get('user_prompt', '')}
-
-        if kwargs.get('files'):
-            user_message["images"] = [self._encode_image(f) for f in kwargs['files']]
+        files = kwargs.get('files') or []
+        if files:
+            invalid_files = [path for path in files if not self._is_image_file(path)]
+            if invalid_files:
+                raise ValueError("OllamaModel accepts images only. Remove non-image files from the 'files' argument.")
+            user_message["images"] = [self._encode_image(f) for f in files]
         
         messages.append(user_message)
 

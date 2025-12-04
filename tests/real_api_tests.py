@@ -124,7 +124,7 @@ def test_multimodal_language_model_call():
     try:
         response, tokens_used, error = call_language_model(
             model_provider='aliyun',
-            model_name='qwen2.5-7b-instruct',
+            model_name='qwen3-vl-plus',
             system_prompt="You are a helpful assistant that can analyze images. Describe what you see briefly.",
             user_prompt="Describe this image in 1-2 sentences.",
             files=[available_image],
@@ -133,7 +133,7 @@ def test_multimodal_language_model_call():
         )
 
         print(f"✓ Model Provider: aliyun")
-        print(f"✓ Model Name: qwen2.5-7b-instruct")
+        print(f"✓ Model Name: qwen3-vl-plus")
         print(f"✓ Image File: {available_image}")
         print(f"✓ Response: {response}")
         print(f"✓ Tokens Used: {tokens_used}")
@@ -154,10 +154,52 @@ def test_multimodal_language_model_call():
         return False
 
 
+def test_file_attachment_language_model_call():
+    """Test language model file input using a non-image file (requires 1.pdf)."""
+    print("\n" + "="*60)
+    print("TEST 4: File Attachment Language Model Call")
+    print("="*60)
+
+    file_path = "1.pdf"
+    if not os.path.exists(file_path):
+        print("⚠️  Skipping file attachment test - '1.pdf' not found in working directory")
+        return True
+
+    try:
+        response, tokens_used, error = call_language_model(
+            model_provider='openrouter',
+            model_name='qwen/qwen3-vl-235b-a22b-instruct',
+            system_prompt="You are a helpful assistant that can read documents.",
+            user_prompt="Summarize the attached PDF in one sentence.",
+            files=[file_path],
+            stream=False,
+            config_path="./llm_config.yaml"
+        )
+
+        print("✓ Model Provider: aliyun")
+        print("✓ Model Name: qwen3-max")
+        print(f"✓ File: {file_path}")
+        print(f"✓ Response: {response}")
+        print(f"✓ Tokens Used: {tokens_used}")
+        print(f"✓ Error: {error or 'None'}")
+
+        assert isinstance(response, str), "Response should be a string"
+        assert len(response) > 0, "Response should not be empty"
+        assert isinstance(tokens_used, int), "Token count should be an integer"
+        assert error is None, f"Should not have error, but got: {error}"
+
+        print("✅ Test passed!")
+        return True
+
+    except Exception as e:
+        print(f"❌ Test failed: {str(e)}")
+        return False
+
+
 def test_embedding_model_call():
     """Test embedding model functionality with real API."""
     print("\n" + "="*60)
-    print("TEST 4: Embedding Model Call")
+    print("TEST 5: Embedding Model Call")
     print("="*60)
     
     try:
@@ -197,7 +239,7 @@ def test_embedding_model_call():
 def test_multiple_text_embeddings():
     """Test embedding model with multiple texts."""
     print("\n" + "="*60)
-    print("TEST 5: Multiple Text Embeddings")
+    print("TEST 6: Multiple Text Embeddings")
     print("="*60)
     
     try:
@@ -242,7 +284,7 @@ def test_multiple_text_embeddings():
 def test_batch_language_model_processing():
     """Test batch processing functionality with real API."""
     print("\n" + "="*60)
-    print("TEST 6: Batch Language Model Processing")
+    print("TEST 7: Batch Language Model Processing")
     print("="*60)
     
     try:
@@ -310,7 +352,7 @@ def test_batch_language_model_processing():
 def test_real_time_save():
     """Test batch processing with real-time file saving functionality."""
     print("\n" + "="*60)
-    print("TEST 7: Real-time File Saving During Batch Processing")
+    print("TEST 8: Real-time File Saving During Batch Processing")
     print("="*60)
     
     try:
@@ -455,7 +497,7 @@ def test_real_time_save():
 def test_custom_configuration():
     """Test using custom configuration instead of config file."""
     print("\n" + "="*60)
-    print("TEST 8: Custom Configuration")
+    print("TEST 9: Custom Configuration")
     print("="*60)
     
     try:
@@ -541,7 +583,7 @@ def test_stream_wrapper_thread_safety():
     This is the core test for verifying stream wrapper thread safety design.
     """
     print("\n" + "="*60)
-    print("TEST 9: Stream Wrapper Thread Safety (Design Verification)")
+    print("TEST 10: Stream Wrapper Thread Safety (Design Verification)")
     print("="*60)
 
     try:
@@ -738,7 +780,7 @@ def test_high_concurrency_stress_test():
     testing system stability under high load. This is a stress test to verify the system 
     can handle large numbers of concurrent requests."""
     print("\n" + "="*60)
-    print("TEST 10: High Concurrency Stress Test (128 independent API calls)")
+    print("TEST 11: High Concurrency Stress Test (128 independent API calls)")
     print("="*60)
     
     import threading
@@ -975,7 +1017,7 @@ def test_high_concurrency_stress_test():
 def test_error_handling():
     """Test error handling with invalid configurations."""
     print("\n" + "="*60)
-    print("TEST 10: Error Handling")
+    print("TEST 12: Error Handling")
     print("="*60)
     
     try:
@@ -1025,6 +1067,7 @@ def run_all_tests():
         ("Basic Language Model Call", test_basic_language_model_call),
         ("Streaming Language Model Call", test_streaming_language_model_call),
         ("Multimodal Language Model Call", test_multimodal_language_model_call),
+        ("File Attachment Language Model Call", test_file_attachment_language_model_call),
         ("Embedding Model Call", test_embedding_model_call),
         ("Multiple Text Embeddings", test_multiple_text_embeddings),
         ("Batch Language Model Processing", test_batch_language_model_processing),

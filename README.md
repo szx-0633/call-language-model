@@ -5,7 +5,7 @@
 ## 主要特点
 
 - **支持多种模型提供商**：OpenAI、OpenAI兼容（阿里云、火山引擎）、Ollama本地模型等
-- **支持多模态输入**：文本 + 图像的多模态处理
+- **支持多模态输入**：文本 + 图像 + 文档（PDF/Office 等）统一处理
 - **支持嵌入模型调用**：提供统一的向量生成接口
 - **支持批量并行调用**：可同时处理多个请求，提高处理效率
 - **进度条显示**：批量处理时可实时查看处理进度和成功率
@@ -102,6 +102,15 @@ response_text, tokens_used, error = call_language_model(
     system_prompt="You are a helpful assistant.",
     user_prompt="请分析这张图片",
     files=['image.jpg']
+)
+
+# 文档附件调用（自动识别非图片文件并作为文件内容发送）
+response_text, tokens_used, error = call_language_model(
+    model_provider='openai',
+    model_name='gpt-4o-mini',
+    system_prompt="You are a helpful assistant that can read documents.",
+    user_prompt="请用中文总结一下这份 PDF 的核心内容",
+    files=['report.pdf']
 )
 
 # 流式调用（收集模式，默认）
@@ -337,13 +346,13 @@ batch_results = batch_call_language_model(
 - `collect`: 流式调用时是否收集结果（默认 True）。设为False时返回流对象，需自行处理
 - `temperature`: 温度参数，控制输出随机性（可选）
 - `max_tokens`: 最大生成 token 数（可选）
-- `files`: 图片文件路径列表，用于多模态输入（可选）
+- `files`: 文件路径列表，用于多模态输入（图片会自动识别为图像，其他类型按文件传输；Ollama 仅支持图片）
 - `skip_model_checking`: 是否跳过模型名称检查，设为True时可使用任意模型名（默认 False）
 - `config_path`: 配置文件路径（默认 "./llm_config.yaml"）
 - `custom_config`: 自定义配置字典，包含api_key和base_url，优先于config_path（可选）
 - `max_completion_tokens`: 最大完成tokens数，用于控制回复长度（可选）
 - `**kwargs`: 其他任意API参数，会直接传递给底层API调用
-- `files`: 图片文件路径列表，用于多模态输入（可选）
+- `files`: 文件路径列表，用于多模态输入（图片会自动识别为图像，其他类型按文件传输；Ollama 仅支持图片）
 - `skip_model_checking`: 是否跳过模型名称检查，设为True时可使用任意模型名（默认 False）
 - `config_path`: 配置文件路径（默认 "./llm_config.yaml"）
 - `custom_config`: 自定义配置字典，包含api_key和base_url，优先于config_path（可选）
@@ -537,6 +546,8 @@ print(f"成功率: {success_rate:.1f}%, 总Token使用: {total_tokens}")
 - **支持批量并行调用**：使用 `batch_call_language_model` 函数可同时处理多个请求
 - **增强的错误处理**：内置重试机制，支持网络错误和连接超时的自动重试
 - **灵活的参数传递**：支持通过kwargs传递任意自定义API参数
+- **文件/图像混合支持**：OpenAI 及兼容端点同时支持图片和通用文件（例如 PDF）；Ollama 只接受图片文件，提供其他类型将抛出错误
+  特别地，请自行确认模型和API是否支持多模态输入或文件输入，调用时不会进行检查，可能导致意外的错误！
 - 支持嵌入模型调用，OpenAI提供商仅支持文本嵌入，Ollama支持多模态嵌入
 - 批量调用模式下不支持真正的流式调用，仅支持收集模式的流式调用
 - 不支持多轮对话，每次调用都是独立的单轮对话
