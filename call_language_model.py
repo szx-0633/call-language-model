@@ -7,7 +7,7 @@ and embedding models through OpenAI-compatible APIs and Ollama.
 
 @File    : call_language_model.py
 @Author  : Zhangxiao Shen
-@Date    : 2025/9/12
+@Date    : 2025/12/6
 @Description: Call language models and embedding models using OpenAI or Ollama APIs.
 """
 
@@ -509,7 +509,7 @@ class OpenAIResponsesModel(BaseModel):
             Dictionary of API parameters with None values filtered out.
         """
         keys_to_remove = ["model_provider", "model_name", "system_prompt", "user_prompt", "stream", "max_tokens",
-                          "skip_model_checking", "config_path", "custom_config"]
+                          "skip_model_checking", "config_path", "custom_config", "files"]
         params = {
             "model": self.credentials.get('model_name', 'gpt-5'),
             "input": messages,
@@ -839,7 +839,7 @@ class OpenAICompatibleModel(BaseModel):
             A dictionary of API parameters with irrelevant keys removed and None values filtered out.
         """
         keys_to_remove = ["model_provider", "model_name", "system_prompt", "user_prompt",
-                          "skip_model_checking", "config_path", "custom_config", "endpoint_url"]
+                          "skip_model_checking", "config_path", "custom_config", "endpoint_url", "files"]
         params = {
             "model": self.credentials.get('model_name', 'gpt-5'),
             "messages": messages,

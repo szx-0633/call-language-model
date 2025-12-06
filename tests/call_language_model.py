@@ -7,7 +7,7 @@ and embedding models through OpenAI-compatible APIs and Ollama.
 
 @File    : call_language_model.py
 @Author  : Zhangxiao Shen
-@Date    : 2025/9/12
+@Date    : 2025/12/6
 @Description: Call language models and embedding models using OpenAI or Ollama APIs.
 """
 
@@ -32,7 +32,7 @@ from tqdm import tqdm
 
 # 配置文件格式：llm_config.yaml，需要放在检查本文件所在路径内或者指定其路径
 # 当前支持多种模型提供商，也可自行添加提供商和模型名称，但仅支持openai（包含openai官方接入点和兼容接入点）和ollama两种渠道调用模型
-# 如果您使用第三方提供的OpenAI模型，请确保其支持/responses端点，否则应设置provider!="OpenAI"以使用兼容的/chat/completions端点
+# 如果您使用第三方提供的OpenAI或其他模型，请确保其支持/responses端点，否则应设置use_responses=False以使用兼容的/chat/completions端点
 # 支持流式调用，设置参数collect=True会将流式调用的结果收集后返回，False会将整个流返回
 # 流式调用时部分模型不支持统计token消耗
 # 使用大语言模型的入口函数为call_language_model
@@ -509,7 +509,7 @@ class OpenAIResponsesModel(BaseModel):
             Dictionary of API parameters with None values filtered out.
         """
         keys_to_remove = ["model_provider", "model_name", "system_prompt", "user_prompt", "stream", "max_tokens",
-                          "skip_model_checking", "config_path", "custom_config"]
+                          "skip_model_checking", "config_path", "custom_config", "files"]
         params = {
             "model": self.credentials.get('model_name', 'gpt-5'),
             "input": messages,
@@ -839,7 +839,7 @@ class OpenAICompatibleModel(BaseModel):
             A dictionary of API parameters with irrelevant keys removed and None values filtered out.
         """
         keys_to_remove = ["model_provider", "model_name", "system_prompt", "user_prompt",
-                          "skip_model_checking", "config_path", "custom_config", "endpoint_url"]
+                          "skip_model_checking", "config_path", "custom_config", "endpoint_url", "files"]
         params = {
             "model": self.credentials.get('model_name', 'gpt-5'),
             "messages": messages,
@@ -1564,7 +1564,8 @@ def call_language_model(
     Import this function into your code to use. Do not use this function to call embedding models.
     
     Args:
-        model_provider: Model provider like "openai", "aliyun", "volcengine", "ollama". OpenAI uses /reponses endpoint, and other OpenAI Compatible ones use /chat/completions endpoint.
+        model_provider: Model provider like "openai", "aliyun", "volcengine", "ollama".
+                OpenAI uses /reponses endpoint, other OpenAI Compatible ones defaultly use /chat/completions endpoint, you can set use_responses to switch.
         model_name: Model name, note that some providers may include version numbers.
         system_prompt: System instruction, optional.
         user_prompt: User input text. Must not be None.
@@ -1574,7 +1575,7 @@ def call_language_model(
         temperature: Sampling temperature, optional.
         max_tokens: Maximum tokens to generate, optional.
         files: List of image file paths, optional.
-        use_responses: Force use of /responses endpoint when True regardless of provider.
+        use_responses: Force use of /responses endpoint when True regardless of provider. Please check provider documentation first.
         skip_model_checking: Whether to skip model name validation (default False).
                             When True, uses provided model name directly without checking configuration.
         config_path: Configuration file path, mutually exclusive with custom_config.
