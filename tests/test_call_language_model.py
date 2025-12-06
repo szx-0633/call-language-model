@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 # Import the module to be tested
 from call_language_model import (
     ModelConfig,
-    OpenAIModel,
+    OpenAIResponsesModel,
     OpenAICompatibleModel,
     OllamaModel,
     OpenAIEmbeddingModel,
@@ -127,7 +127,7 @@ class TestModelConfig(unittest.TestCase):
 
         from call_language_model import (
             ModelConfig,
-            OpenAIModel,
+            OpenAIResponsesModel,
             OpenAICompatibleModel,
             OllamaModel,
             OpenAIEmbeddingModel,
@@ -189,7 +189,7 @@ class TestModelConfig(unittest.TestCase):
                 self.assertEqual(cred['model_name'], 'gpt-4o')
 
 
-        class TestOpenAIModel(unittest.TestCase):
+        class TestOpenAIResponsesModel(unittest.TestCase):
             def setUp(self):
                 self.credentials = {'provider': 'openai', 'model_name': 'gpt-4o', 'api_key': 'k', 'base_url': 'https://api.openai.com/v1'}
 
@@ -203,7 +203,7 @@ class TestModelConfig(unittest.TestCase):
                     'usage': {'total_tokens': 42}
                 }
                 mock_post.return_value = MockHTTPResponse(json_body)
-                model = OpenAIModel(self.credentials)
+                model = OpenAIResponsesModel(self.credentials)
                 text, tokens, err = model.generate(system_prompt='s', user_prompt='u')
                 self.assertIn('Final answer', text)
                 self.assertEqual(tokens, 42)
@@ -221,7 +221,7 @@ class TestModelConfig(unittest.TestCase):
                     'data: [DONE]'
                 ]
                 mock_post.return_value = MockHTTPResponse({}, lines=chunks)
-                model = OpenAIModel(self.credentials)
+                model = OpenAIResponsesModel(self.credentials)
                 text, tokens, err = model.generate_stream(system_prompt='s', user_prompt='u', collect=True)
                 self.assertEqual(text, 'Hello world!')
                 self.assertEqual(tokens, 10)
@@ -332,7 +332,7 @@ class TestModelConfig(unittest.TestCase):
 
 
         class TestFacadeFunctions(BaseConfigTest):
-            @patch('call_language_model.OpenAIModel.generate')
+            @patch('call_language_model.OpenAIResponsesModel.generate')
             def test_call_language_model_openai(self, mock_gen):
                 mock_gen.return_value = ("R", 5, None)
                 txt, tokens, err = call_language_model('openai', 'gpt-4o', system_prompt='s', user_prompt='u', config_path=self.temp_config_file.name)
@@ -383,7 +383,7 @@ class TestModelConfig(unittest.TestCase):
         """Clean up test fixtures."""
         os.unlink(self.temp_config_file.name)
     
-    @patch('call_language_model.OpenAIModel')
+    @patch('call_language_model.OpenAIResponsesModel')
     def test_call_language_model_openai_provider(self, mock_openai_model):
         """Test call_language_model function with OpenAI provider (uses /responses endpoint)."""
         # Mock model instance
@@ -440,7 +440,7 @@ class TestModelConfig(unittest.TestCase):
         self.assertIsNone(error)
         mock_compatible_model.assert_called_once()
     
-    @patch('call_language_model.OpenAIModel')
+    @patch('call_language_model.OpenAIResponsesModel')
     def test_call_language_model_with_custom_config(self, mock_openai_model):
         """Test call_language_model function with custom config."""
         # Mock model instance
@@ -466,7 +466,7 @@ class TestModelConfig(unittest.TestCase):
         self.assertEqual(tokens_used, 150)
         self.assertIsNone(error)
     
-    @patch('call_language_model.OpenAIModel')
+    @patch('call_language_model.OpenAIResponsesModel')
     def test_call_language_model_with_additional_params(self, mock_openai_model):
         """Test call_language_model function with additional parameters (kwargs)."""
         # Mock model instance
@@ -661,7 +661,7 @@ def run_demo_tests():
         
         # Test language model with mock
         print("\n2. Testing Language Model Call (Mocked):")
-        with patch('call_language_model.OpenAIModel') as mock_model:
+        with patch('call_language_model.OpenAIResponsesModel') as mock_model:
             mock_instance = Mock()
             mock_instance.generate.return_value = ("Hello! This is a test response.", 45, None)
             mock_model.return_value = mock_instance

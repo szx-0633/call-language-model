@@ -390,7 +390,7 @@ class BaseModel:
         raise NotImplementedError
 
 
-class OpenAIModel(BaseModel):
+class OpenAIResponsesModel(BaseModel):
     """
     OpenAI model (or other models that supports /responses endpoint) handler.
     THIS IS ONLY for OpenAI /responses endpoint. Specify model_provider="openai" for this method.
@@ -1553,6 +1553,7 @@ def call_language_model(
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         files: Optional[List[str]] = None,
+        use_responses: bool = False,
         skip_model_checking: bool = False,
         config_path: Optional[str] = r'./llm_config.yaml',
         custom_config: Optional[Dict] = None,
@@ -1573,6 +1574,7 @@ def call_language_model(
         temperature: Sampling temperature, optional.
         max_tokens: Maximum tokens to generate, optional.
         files: List of image file paths, optional.
+        use_responses: Force use of /responses endpoint when True regardless of provider.
         skip_model_checking: Whether to skip model name validation (default False).
                             When True, uses provided model name directly without checking configuration.
         config_path: Configuration file path, mutually exclusive with custom_config.
@@ -1590,6 +1592,10 @@ def call_language_model(
         print(error_msg)
         logging.error(error_msg)
         return "", 0, error_msg
+
+    # Allow legacy callers to forward use_responses via kwargs without sending it downstream
+    if 'use_responses' in kwargs:
+        use_responses = use_responses or bool(kwargs.pop('use_responses'))
 
     # Initialize
     if custom_config is not None:
@@ -1611,12 +1617,13 @@ def call_language_model(
         logging.error(error_msg)
         return "", 0, error_msg
 
-    if model_provider.lower() == "ollama":
+    provider_lower = model_provider.lower()
+
+    if provider_lower == "ollama":
         model_class = OllamaModel
-    elif model_provider.lower() == "openai":
-        model_class = OpenAIModel
     else:
-        model_class = OpenAICompatibleModel
+        use_responses_flag = use_responses or provider_lower == "openai"
+        model_class = OpenAIResponsesModel if use_responses_flag else OpenAICompatibleModel
 
     if not model_class:
         error_msg = f"Unsupported model provider: {model_provider}"

@@ -32,7 +32,7 @@ from tqdm import tqdm
 
 # 配置文件格式：llm_config.yaml，需要放在检查本文件所在路径内或者指定其路径
 # 当前支持多种模型提供商，也可自行添加提供商和模型名称，但仅支持openai（包含openai官方接入点和兼容接入点）和ollama两种渠道调用模型
-# 如果您使用第三方提供的OpenAI模型，请确保其支持/responses端点，否则应设置provider!="OpenAI"以使用兼容的/chat/completions端点
+# 如果您使用第三方提供的OpenAI或其他模型，请确保其支持/responses端点，否则应设置use_responses=False以使用兼容的/chat/completions端点
 # 支持流式调用，设置参数collect=True会将流式调用的结果收集后返回，False会将整个流返回
 # 流式调用时部分模型不支持统计token消耗
 # 使用大语言模型的入口函数为call_language_model
@@ -390,7 +390,7 @@ class BaseModel:
         raise NotImplementedError
 
 
-class OpenAIModel(BaseModel):
+class OpenAIResponsesModel(BaseModel):
     """
     OpenAI model (or other models that supports /responses endpoint) handler.
     THIS IS ONLY for OpenAI /responses endpoint. Specify model_provider="openai" for this method.
@@ -1553,6 +1553,7 @@ def call_language_model(
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         files: Optional[List[str]] = None,
+        use_responses: bool = False,
         skip_model_checking: bool = False,
         config_path: Optional[str] = r'./llm_config.yaml',
         custom_config: Optional[Dict] = None,
@@ -1563,7 +1564,8 @@ def call_language_model(
     Import this function into your code to use. Do not use this function to call embedding models.
     
     Args:
-        model_provider: Model provider like "openai", "aliyun", "volcengine", "ollama". OpenAI uses /reponses endpoint, and other OpenAI Compatible ones use /chat/completions endpoint.
+        model_provider: Model provider like "openai", "aliyun", "volcengine", "ollama".
+                OpenAI uses /reponses endpoint, other OpenAI Compatible ones defaultly use /chat/completions endpoint, you can set use_responses to switch.
         model_name: Model name, note that some providers may include version numbers.
         system_prompt: System instruction, optional.
         user_prompt: User input text. Must not be None.
@@ -1573,6 +1575,7 @@ def call_language_model(
         temperature: Sampling temperature, optional.
         max_tokens: Maximum tokens to generate, optional.
         files: List of image file paths, optional.
+        use_responses: Force use of /responses endpoint when True regardless of provider. Please check provider documentation first.
         skip_model_checking: Whether to skip model name validation (default False).
                             When True, uses provided model name directly without checking configuration.
         config_path: Configuration file path, mutually exclusive with custom_config.
@@ -1590,6 +1593,10 @@ def call_language_model(
         print(error_msg)
         logging.error(error_msg)
         return "", 0, error_msg
+
+    # Allow legacy callers to forward use_responses via kwargs without sending it downstream
+    if 'use_responses' in kwargs:
+        use_responses = use_responses or bool(kwargs.pop('use_responses'))
 
     # Initialize
     if custom_config is not None:
@@ -1611,12 +1618,13 @@ def call_language_model(
         logging.error(error_msg)
         return "", 0, error_msg
 
-    if model_provider.lower() == "ollama":
+    provider_lower = model_provider.lower()
+
+    if provider_lower == "ollama":
         model_class = OllamaModel
-    elif model_provider.lower() == "openai":
-        model_class = OpenAIModel
     else:
-        model_class = OpenAICompatibleModel
+        use_responses_flag = use_responses or provider_lower == "openai"
+        model_class = OpenAIResponsesModel if use_responses_flag else OpenAICompatibleModel
 
     if not model_class:
         error_msg = f"Unsupported model provider: {model_provider}"

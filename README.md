@@ -119,6 +119,7 @@ response_text, tokens_used, error = call_language_model(
     model_name='qwen2.5-32b-instruct',
     system_prompt="You are a helpful assistant.",
     user_prompt="请写一篇关于环保的短文",
+    use_responses=True,  # 对第三方提供商，可强制使用 /responses 端点
     stream=True,
     collect=True  # 收集流式结果后一次性返回
 )
@@ -129,6 +130,7 @@ response_stream, tokens_used, error = call_language_model(
     model_name='qwen2.5-32b-instruct',
     system_prompt="You are a helpful assistant.",
     user_prompt="请写一篇关于环保的短文",
+    use_responses=True,  # 对第三方提供商，可强制使用 /responses 端点
     stream=True,
     collect=False  # 返回流对象，需要自行处理
 )
@@ -173,7 +175,7 @@ response_stream, tokens_used, error = call_language_model(
     }
 )
 
-# 处理OpenAI推理模型的流式响应
+# 处理OpenAI或第三方/responses端点模型的流式响应
 is_first_chunk = True
 if not error and response_stream:
     for chunk in response_stream:
@@ -338,7 +340,8 @@ batch_results = batch_call_language_model(
 
 ### `call_language_model` 函数参数
 
-- `model_provider`: 模型提供商，如 "openai"（使用/responses端点）, "aliyun", "volcengine"（使用/chat/completions端点）, "ollama"
+- `model_provider`: 模型提供商，如 "openai"（使用/responses端点）,
+         "aliyun", "volcengine"（默认使用/chat/completions端点，可切换至/responses端点）, "ollama"
 - `model_name`: 模型名称，需在配置文件中定义（除非设置skip_model_checking=True）
 - `system_prompt`: 系统提示，默认为None
 - `user_prompt`: 用户提示，不可为空
@@ -347,6 +350,7 @@ batch_results = batch_call_language_model(
 - `temperature`: 温度参数，控制输出随机性（可选）
 - `max_tokens`: 最大生成 token 数（可选）
 - `files`: 文件路径列表，用于多模态输入（图片会自动识别为图像，其他类型按文件传输；Ollama 仅支持图片）
+- `use_responses`: 是否强制使用 `/responses` 端点（默认 False）
 - `skip_model_checking`: 是否跳过模型名称检查，设为True时可使用任意模型名（默认 False）
 - `config_path`: 配置文件路径（默认 "./llm_config.yaml"）
 - `custom_config`: 自定义配置字典，包含api_key和base_url，优先于config_path（可选）
@@ -536,7 +540,8 @@ print(f"成功率: {success_rate:.1f}%, 总Token使用: {total_tokens}")
 
 ## 注意事项
 
-- **支持两种API端点**：OpenAI提供商使用原生/responses端点（支持推理内容），其他提供商使用/chat/completions端点
+- **支持两种API端点**：OpenAI提供商使用原生/responses端点（支持推理内容），其他提供商使用/chat/completions端点，也可通过`use_responses`参数强制使
+  用/responses端点（需确保提供商支持）
 - **增强的推理支持**：OpenAI o1系列模型支持推理过程显示和推理强度控制
 - **支持真正的流式调用**：设置 `stream=True, collect=False` 可获得实时输出流
 - **支持批量并行调用**：使用 `batch_call_language_model` 函数可同时处理多个请求

@@ -36,7 +36,7 @@ def demo_language_model_testing():
     print("\n1. Testing Basic OpenAI Language Model Call (/responses endpoint):")
     print("-" * 40)
     
-    with patch('call_language_model.OpenAIModel') as mock_model:
+    with patch('call_language_model.OpenAIResponsesModel') as mock_model:
         # Create mock instance
         mock_instance = Mock()
         mock_instance.generate.return_value = (
@@ -101,7 +101,7 @@ def demo_language_model_testing():
     print("\n3. Testing Reasoning Content Handling:")
     print("-" * 40)
     
-    with patch('call_language_model.OpenAIModel') as mock_model:
+    with patch('call_language_model.OpenAIResponsesModel') as mock_model:
         # Create mock instance with reasoning content
         mock_instance = Mock()
         mock_instance.generate.return_value = (
@@ -135,7 +135,7 @@ def demo_language_model_testing():
     print("\n4. Testing Multimodal Language Model Call:")
     print("-" * 40)
     
-    with patch('call_language_model.OpenAIModel') as mock_model:
+    with patch('call_language_model.OpenAIResponsesModel') as mock_model:
         # Create mock instance
         mock_instance = Mock()
         mock_instance.generate.return_value = (
@@ -168,7 +168,7 @@ def demo_language_model_testing():
     print("\n5. Testing Streaming Language Model Call with Reasoning:")
     print("-" * 40)
     
-    with patch('call_language_model.OpenAIModel') as mock_model:
+    with patch('call_language_model.OpenAIResponsesModel') as mock_model:
         # Create mock instance
         mock_instance = Mock()
         mock_instance.generate_stream.return_value = (
@@ -428,7 +428,7 @@ def demo_custom_config_testing():
     print("\n1. Testing Custom Config Instead of File:")
     print("-" * 40)
     
-    with patch('call_language_model.OpenAIModel') as mock_model:
+    with patch('call_language_model.OpenAIResponsesModel') as mock_model:
         # Create mock instance
         mock_instance = Mock()
         mock_instance.generate.return_value = (
@@ -464,7 +464,7 @@ def demo_custom_config_testing():
     print("\n2. Testing Advanced Parameters (kwargs):")
     print("-" * 40)
     
-    with patch('call_language_model.OpenAIModel') as mock_model:
+    with patch('call_language_model.OpenAIResponsesModel') as mock_model:
         # Create mock instance
         mock_instance = Mock()
         mock_instance.generate.return_value = (
